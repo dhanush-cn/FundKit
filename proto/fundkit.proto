@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package fundkit;
+option go_package = "./pb";
+
+service PortfolioService {
+  rpc GetPortfolio(PortfolioRequest) returns (PortfolioResponse);
+  rpc GetUserPnL(PnLRequest) returns (PnLResponse);
+}
+
+message PortfolioRequest {
+  string user_id = 1;
+}
+
+message PortfolioResponse {
+  string user_id = 1;
+  double total_value = 2;
+  repeated MutualFundHolding holdings = 3;
+}
+
+message MutualFundHolding {
+  string fund_name = 1;
+  double units = 2;
+  double nav = 3;
+}
+
+message PnLRequest {
+  string user_id = 1;
+}
+
+message PnLResponse {
+  string user_id = 1;
+  double total_value = 2;
+  double total_unrealized_gain = 3;
+  repeated HoldingPnL holdings = 4;
+}
+
+message HoldingPnL {
+  string fund_id = 1;
+  string fund_name = 2;
+  double units = 3;
+  double invested_amount = 4;
+  double nav = 5;
+  double current_value = 6;
+  double unrealized_gain = 7;
+}
