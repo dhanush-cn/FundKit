@@ -1,0 +1,126 @@
+services:
+  # Infrastructure
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    ports:
+      - 29092:29092
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fundkit
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: fundkit_db
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Microservices
+  api-gateway:
+    build: ./api-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      - kafka
+    environment:
+      - PORT=8080
+      - KAFKA_BROKERS=kafka:9092
+      - JWT_SECRET=dev-secret
+      - ORDER_SERVICE_URL=http://order-service:8081
+      - ORDER_SERVICE_HEALTH_URL=http://order-service:8081/health
+      - PORTFOLIO_SERVICE_HEALTH_URL=http://portfolio-service:8082/health
+      - NOTIFICATION_SERVICE_HEALTH_URL=http://notification-service:8083/health
+
+  order-service:
+    build: ./order-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - DB_URL=postgres://fundkit:password@postgres:5432/fundkit_db?sslmode=disable
+      - REDIS_URL=redis:6379
+      - PORTFOLIO_GRPC_URL=portfolio-service:50051
+
+  portfolio-service:
+    build: ./portfolio-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DB_URL=postgres://fundkit:password@postgres:5432/fundkit_db?sslmode=disable
+      - REDIS_URL=redis:6379
+
+  notification-service:
+    build: ./notification-service
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    environment:
+      - PORT=8083
+      - KAFKA_BROKERS=kafka:9092
+
+  # UI
+  
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - api-gateway
+
+  # Monitoring
+  prometheus:
+    image: prom/prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
