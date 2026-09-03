@@ -24,7 +24,7 @@ import { useOrders } from './hooks/useOrders';
 import { usePortfolio } from './hooks/usePortfolio';
 import { useServiceHealth } from './hooks/useServiceHealth';
 import { API_BASE_URL } from './lib/api';
-import { formatCurrency, formatDate, statusTone } from './lib/format';
+import { formatCurrency, formatDate, formatPaise, rupeesToPaise, statusTone } from './lib/format';
 import type { OrderType } from './types';
 import './App.css';
 
@@ -73,10 +73,19 @@ export default function App() {
   const handleSubmit = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
+      // The field holds rupees because that is what a person types; the API
+      // takes paise. Converting here, once, at the boundary, is the same rule
+      // the Go handlers follow — and the conversion is exact, so ₹100.50
+      // becomes 10050 rather than 10049.999999999998.
+      const amountPaise = rupeesToPaise(form.amount);
+      if (!Number.isFinite(amountPaise) || amountPaise <= 0) {
+        return;
+      }
+
       const placed = await orders.placeOrder({
         user_id: signedInUserId,
         fund_id: form.fundId,
-        amount: Number(form.amount),
+        amount: amountPaise,
         type: form.type,
         idempotency_key: form.idempotencyKey,
       });
@@ -177,7 +186,7 @@ export default function App() {
                 {health.allHealthy ? 'Stable' : 'Degraded'}
               </span>
             </div>
-            <div className="hero-card-metric">{formatCurrency(orders.metrics.totalInvested)}</div>
+            <div className="hero-card-metric">{formatPaise(orders.metrics.totalInvested)}</div>
             <div className="hero-card-caption">Capital routed through the order service</div>
             <div className="hero-card-row">
               <span><CheckCircle2 size={14} /> {orders.metrics.executed} executed</span>
@@ -233,11 +242,15 @@ export default function App() {
                 Fund ID
                 <input value={form.fundId} onChange={(event) => setForm({ ...form, fundId: event.target.value })} />
               </label>
+              {/* step is 0.01 so the field can express paise. The old step of 1
+                  could not represent ₹100.50 at all, which is part of why the
+                  rounding question stayed invisible for so long. */}
               <label>
-                Amount
+                Amount (₹)
                 <input
                   type="number"
-                  min="1"
+                  min="0.01"
+                  step="0.01"
                   value={form.amount}
                   onChange={(event) => setForm({ ...form, amount: event.target.value })}
                 />
@@ -406,7 +419,7 @@ export default function App() {
                           </div>
                         </div>
                       </td>
-                      <td>{formatCurrency(order.amount)}</td>
+                      <td>{formatPaise(order.amount)}</td>
                       <td>{order.type}</td>
                       <td>
                         <span className={`order-badge order-badge-${statusTone(order.status)}`}>

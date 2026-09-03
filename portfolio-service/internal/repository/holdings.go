@@ -11,6 +11,8 @@ import (
 // HoldingsRepository is an in-memory stand-in for the custodian ledger. It is
 // deliberately behind an interface-shaped type so swapping it for Postgres is a
 // one-file change that the service layer never sees.
+//
+// Seeded amounts are paise: 150000 is ₹1,500.00.
 type HoldingsRepository struct {
 	mu     sync.RWMutex
 	byUser map[string][]domain.Holding
@@ -20,11 +22,11 @@ func NewHoldingsRepository() *HoldingsRepository {
 	return &HoldingsRepository{
 		byUser: map[string][]domain.Holding{
 			"user-1": {
-				{FundID: "fund-axi-blue", FundName: "AXI Bluechip", Units: 12.5, InvestedAmount: 1500},
-				{FundID: "fund-icici-growth", FundName: "ICICI Growth", Units: 8.2, InvestedAmount: 1200},
+				{FundID: "fund-axi-blue", FundName: "AXI Bluechip", Units: 12.5, InvestedAmount: 150000},
+				{FundID: "fund-icici-growth", FundName: "ICICI Growth", Units: 8.2, InvestedAmount: 120000},
 			},
 			"user-2": {
-				{FundID: "fund-hdfc-top", FundName: "HDFC Top 100", Units: 20.0, InvestedAmount: 3200},
+				{FundID: "fund-hdfc-top", FundName: "HDFC Top 100", Units: 20.0, InvestedAmount: 320000},
 			},
 		},
 	}

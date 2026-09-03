@@ -51,9 +51,13 @@ func (n *Notifier) Handle(ctx context.Context, event domain.OrderEvent) error {
 		n.logger.DebugContext(ctx, "ignoring unrelated event", slog.String("event_type", event.EventType))
 		return nil
 	}
-	if event.Order.ID == "" {
-		n.logger.WarnContext(ctx, "ignoring event with no order payload")
-		return nil
+	// Contract check before any delivery work. A version mismatch or a missing
+	// order id returns an error wrapping domain.ErrPermanent, which the consumer
+	// reads as "do not retry, dead-letter it now". Returning nil here instead —
+	// as the old order-id check did — would commit the offset and lose the
+	// event, which is exactly the silent drop the DLQ exists to end.
+	if err := event.Validate(); err != nil {
+		return err
 	}
 	if n.alreadyHandled(event.EventID) {
 		n.logger.DebugContext(ctx, "duplicate event suppressed", slog.String("event_id", event.EventID))
@@ -71,10 +75,13 @@ func (n *Notifier) Handle(ctx context.Context, event domain.OrderEvent) error {
 	}
 
 	recipient := event.Order.Recipient()
+	// %s on the amount rather than %.2f: Money implements fmt.Stringer, so the
+	// customer sees ₹1,50,000.00 with Indian grouping and the formatting rule
+	// lives in one place instead of at every call site that renders money.
 	message := Message{
 		Subject: fmt.Sprintf("FundKit order %s is %s", event.Order.ID, event.Order.Status),
 		Body: fmt.Sprintf(
-			"Dear %s,\nYour %s order for %s (amount %.2f) is now %s.\nThank you for using FundKit.",
+			"Dear %s,\nYour %s order for %s (amount %s) is now %s.\nThank you for using FundKit.",
 			recipient.Name, event.Order.Type, event.Order.FundID, event.Order.Amount, event.Order.Status,
 		),
 	}

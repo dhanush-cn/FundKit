@@ -61,14 +61,12 @@ func (s *PortfolioService) Valuate(ctx context.Context, userID string) (domain.P
 			prices[holding.FundID] = price
 		}
 
-		valued := holding.Value(price)
-		valuation.TotalValue += valued.CurrentValue
-		valuation.TotalUnrealizedGain += valued.UnrealizedGain
-		valuation.Holdings = append(valuation.Holdings, valued)
+		valuation.Add(holding.Value(price))
 	}
 
-	valuation.TotalValue = domain.Round2(valuation.TotalValue)
-	valuation.TotalUnrealizedGain = domain.Round2(valuation.TotalUnrealizedGain)
+	// No rounding pass on the totals any more. They are sums of exact paise, so
+	// they are already exact; the Round2 calls that used to live here existed
+	// only to paper over float64 accumulation error.
 	return valuation, nil
 }
 

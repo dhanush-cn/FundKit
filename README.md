@@ -120,7 +120,11 @@ which is read on every valuation but changes once a day.
 | Password storage | bcrypt with a configurable cost | SHA-256, or a salted digest of my own | The work factor is the mechanism: it makes each guess expensive. Rolling your own is how password databases get cracked in an afternoon. |
 | Customer contact details | Copied onto the order and carried on the event | Looked up from identity when an alert is sent | Notification delivery stays fully asynchronous: identity being slow or down cannot stall the alert pipeline. The cost is a snapshot that goes stale if the customer edits their profile, which is acceptable for addressing a message rather than authorising one. |
 | Order lifecycle worker | Goroutine on a detached context | Request-scoped goroutine | `context.WithoutCancel` keeps the correlation id while dropping the caller's cancellation, so an order is not abandoned mid-transition when the client hangs up. |
-| Money representation | `float64` for display valuations | Integer minor units everywhere | Honest scoping: NAV valuations are presentational. A production ledger would use integer paise end to end. |
+| Money representation | Integer paise (`int64`) in the domain, the database and on the wire | `float64` rupees | `0.1 + 0.2 != 0.3` in IEEE-754, so a float ledger drifts by a few paise per reconciliation and nobody can reproduce the complaint. The column is `BIGINT`, the JSON field is an integer, and a client sending the decimal `100.50` gets a 400 rather than a silent truncation. Units and NAV stay `float64` — a unit count is genuinely fractional and a NAV is a quoted price, so neither is money. |
+| Money on the gRPC contract | Converted to `double` at the portfolio boundary | Changing the `.proto` to `int64` in the same commit | The internals are exact either way. The `.proto` is a published contract, so changing its units is a breaking release of its own rather than a side effect of an internal refactor. The conversion is confined to two functions in `grpc_server.go`. |
+| Unprocessable events | Retry three times, then park on `order_events_dlq` | Retry forever, or commit and drop | Retrying forever stalls the partition and every message behind it; dropping loses a customer's event with only a log line as evidence. Parking keeps the partition moving and turns "things needing a human" into a queue with a depth you can alert on. The offset is committed only after the park succeeds — if the DLQ write fails, the consumer would rather be stuck and visible than moving and lossy. |
+| Retry classification | By error type (`domain.ErrPermanent`), not by attempt count | A flat retry budget for every failure | A provider timeout deserves several attempts; an unreadable schema version deserves none, because every attempt fails identically while the partition waits. |
+| Schema management | Versioned `.sql` files applied by golang-migrate before boot | GORM `AutoMigrate` on startup | AutoMigrate is invisible to review, unordered, raced by replicas, never drops or narrows a column, cannot express a `CHECK` constraint or a partial index, and has no inverse. order-service now *verifies* the schema version on boot and refuses to start if it is behind — a missing migration is a container that will not start, not a 500 on the first request that touches a missing column. |
 
 ---
 
@@ -139,7 +143,7 @@ no call site has to remember to attach it:
 
 ```json
 {"time":"2026-09-02T10:14:22Z","level":"INFO","msg":"order placed","service":"order-service",
- "x-request-id":"9f2c1e5a4b7d8c3e1f0a6b2d5c8e7f31","order_id":"6b7e…","amount":5000}
+ "x-request-id":"9f2c1e5a4b7d8c3e1f0a6b2d5c8e7f31","order_id":"6b7e…","amount_paise":500000,"amount":"₹5,000.00"}
 ```
 
 `grep` one id across all four services and you have the whole request.

@@ -165,8 +165,9 @@ func newOrderTestRouter() (*gin.Engine, *service.OrderService) {
 
 func orderBody() map[string]any {
 	return map[string]any{
-		"fund_id":         "quant-small-cap-fund",
-		"amount":          5000,
+		"fund_id": "quant-small-cap-fund",
+		// Paise, not rupees: the API takes an integer and rejects a decimal.
+		"amount":          500000,
 		"type":            "SIP",
 		"idempotency_key": "key-1",
 	}
@@ -262,6 +263,11 @@ func TestCreateValidatesThePayload(t *testing.T) {
 		{name: "missing fund", mutate: func(body map[string]any) { delete(body, "fund_id") }},
 		{name: "zero amount", mutate: func(body map[string]any) { body["amount"] = 0 }},
 		{name: "negative amount", mutate: func(body map[string]any) { body["amount"] = -100 }},
+		// A client still thinking in rupees sends 100.50. That must be a loud
+		// 400 rather than a quiet truncation to ₹1.00 — encoding/json refuses
+		// to decode a fractional number into the integer paise field, which is
+		// the whole reason the wire type is an integer.
+		{name: "decimal amount", mutate: func(body map[string]any) { body["amount"] = 100.50 }},
 		{name: "unknown order type", mutate: func(body map[string]any) { body["type"] = "SWING-TRADE" }},
 		{name: "missing idempotency key", mutate: func(body map[string]any) { delete(body, "idempotency_key") }},
 	}

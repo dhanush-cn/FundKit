@@ -94,7 +94,7 @@ func (p *Publisher) PublishOrderStatusChanged(ctx context.Context, order domain.
 	event := OrderEvent{
 		EventID:    trace.NewID(),
 		EventType:  EventOrderStatusChanged,
-		Version:    1,
+		Version:    domain.OrderEventVersion,
 		OccurredAt: time.Now().UTC(),
 		RequestID:  requestID,
 		Order:      order,

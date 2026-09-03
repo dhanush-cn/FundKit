@@ -1,9 +1,13 @@
 -- FundKit transactional outbox
 -- Engineered by Dhanush C N (github.com/dhanush-cn)
 --
--- Applied automatically at boot by repository.OpenPostgres (AutoMigrate for the
--- table, raw DDL for the partial index). Kept here as the canonical, reviewable
--- definition and for environments where migrations are run out-of-band.
+-- This file used to be documentation: the table was really created by
+-- AutoMigrate at boot and the partial index by raw DDL in Go, with this SQL
+-- kept alongside as "the canonical definition". Two sources of truth that had
+-- to be manually kept in agreement, which is not a definition at all.
+--
+-- It is now the only source. golang-migrate applies it, exactly once, in
+-- order, before the service starts.
 
 CREATE TABLE IF NOT EXISTS outbox (
     id              BIGSERIAL     PRIMARY KEY,
@@ -19,9 +23,9 @@ CREATE TABLE IF NOT EXISTS outbox (
     processed_at    TIMESTAMPTZ
 );
 
--- Applied separately by repository.createOutboxIndexes so that a database
--- created by AutoMigrate ends up with the same constraint as one created from
--- this file. Postgres has no CREATE CONSTRAINT IF NOT EXISTS, hence the guard.
+-- Postgres has no CREATE CONSTRAINT IF NOT EXISTS, so the drop-then-add keeps
+-- this file safe to re-run against a database that predates the migration
+-- tooling.
 ALTER TABLE outbox DROP CONSTRAINT IF EXISTS outbox_status_check;
 ALTER TABLE outbox ADD CONSTRAINT outbox_status_check
     CHECK (status IN ('PENDING', 'PROCESSED', 'FAILED'));

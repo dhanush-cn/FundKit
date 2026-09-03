@@ -70,6 +70,28 @@ services:
       timeout: 5s
       retries: 10
 
+  # ---------------------------------------------------------------- migrations
+  #
+  # Schema migrations run as their own one-shot service rather than inside
+  # order-service's startup. That is the point of the change: applying DDL is a
+  # deployment step with a beginning and an end, not something two replicas race
+  # to do on boot. The container exits 0 when the schema is current, and
+  # order-service will not start until it has.
+  migrate:
+    image: migrate/migrate:v4.17.1
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./order-service/migrations:/migrations:ro
+    command:
+      [
+        "-path=/migrations",
+        "-database=postgres://fundkit:password@postgres:5432/fundkit_db?sslmode=disable&x-migrations-table=order_service_schema_migrations",
+        "up",
+      ]
+
   # ---------------------------------------------------------------- microservices
   api-gateway:
     build: ./api-gateway
@@ -110,6 +132,12 @@ services:
       - "8081:8081"
       - "9102:9100"
     depends_on:
+      # Not just "postgres is up" — "the schema is at the version this build
+      # requires". order-service verifies that itself on boot and exits if it is
+      # not, so without this gate a fresh `compose up` would crash-loop until
+      # the migration container happened to finish.
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -170,6 +198,12 @@ services:
       FUNDKIT_KAFKA_BROKERS: kafka:9092
       FUNDKIT_KAFKA_ORDER_TOPIC: order_events
       FUNDKIT_KAFKA_CONSUMER_GROUP: fundkit-notification-workers
+      # Dead-letter queue: where a message goes when this service cannot
+      # process it, so a poison event stops blocking the partition without
+      # being lost.
+      FUNDKIT_KAFKA_DLQ_TOPIC: order_events_dlq
+      FUNDKIT_KAFKA_MAX_ATTEMPTS: "3"
+      FUNDKIT_KAFKA_RETRY_BACKOFF: 200ms
 
   # ---------------------------------------------------------------- ui
   frontend:

@@ -48,7 +48,11 @@ func testDB(t *testing.T) *gorm.DB {
 		ConnMaxLifetime: time.Minute,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
-		t.Fatalf("connect to the test database: %v", err)
+		// OpenPostgres verifies the schema version rather than creating the
+		// schema, so this is the failure a developer sees when they have
+		// started the stack but not run the migrations.
+		t.Fatalf("connect to the test database (run `make migrate-up` first — "+
+			"the service no longer creates its own schema): %v", err)
 	}
 
 	t.Cleanup(func() {
@@ -81,7 +85,7 @@ func newOrder(key string) *domain.Order {
 		UserEmail:      "dhanush@example.com",
 		UserPhone:      "+919876543210",
 		FundID:         "quant-small-cap-fund",
-		Amount:         5000,
+		Amount:         500000, // paise: ₹5,000.00
 		Type:           domain.TypeSIP,
 		Status:         domain.StatusPending,
 		IdempotencyKey: key,

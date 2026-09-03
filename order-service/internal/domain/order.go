@@ -49,13 +49,18 @@ var (
 // at that moment, and notification-service should not need a synchronous call
 // back into identity just to find an inbox.
 type Order struct {
-	ID             string      `gorm:"primaryKey" json:"id"`
-	UserID         string      `gorm:"index" json:"user_id"`
-	UserName       string      `gorm:"size:128" json:"user_name,omitempty"`
-	UserEmail      string      `gorm:"size:255" json:"user_email,omitempty"`
-	UserPhone      string      `gorm:"size:32" json:"user_phone,omitempty"`
-	FundID         string      `json:"fund_id"`
-	Amount         float64     `json:"amount"`
+	ID        string `gorm:"primaryKey" json:"id"`
+	UserID    string `gorm:"index" json:"user_id"`
+	UserName  string `gorm:"size:128" json:"user_name,omitempty"`
+	UserEmail string `gorm:"size:255" json:"user_email,omitempty"`
+	UserPhone string `gorm:"size:32" json:"user_phone,omitempty"`
+	FundID    string `json:"fund_id"`
+	// Amount is paise, and it is paise on the wire too. `"amount": 10050`
+	// means ₹100.50. The API deliberately does not accept or emit a decimal
+	// rupee figure: a JSON number is a float64 at the far end of the
+	// connection, so a decimal contract would reintroduce, in the client, the
+	// exact imprecision the integer column removes in the database.
+	Amount         Money       `gorm:"type:bigint;not null" json:"amount"`
 	Type           OrderType   `json:"type"`
 	Status         OrderStatus `json:"status"`
 	IdempotencyKey string      `gorm:"uniqueIndex" json:"idempotency_key"`
@@ -70,7 +75,7 @@ type NewOrder struct {
 	UserEmail      string
 	UserPhone      string
 	FundID         string
-	Amount         float64
+	Amount         Money
 	Type           OrderType
 	IdempotencyKey string
 }
@@ -103,6 +108,13 @@ func (o *Order) Transition(next OrderStatus) error {
 // IsTerminal reports whether the order has reached an absorbing state.
 func (o *Order) IsTerminal() bool {
 	return o.Status == StatusExecuted || o.Status == StatusFailed
+}
+
+// DisplayAmount renders the order value for humans — logs, emails, an operator
+// console. Presentation lives on the aggregate so that no caller is tempted to
+// divide by 100 itself and get the rounding subtly wrong.
+func (o *Order) DisplayAmount() string {
+	return o.Amount.String()
 }
 
 // BeforeCreate assigns a UUID primary key. Client-opaque identifiers keep the

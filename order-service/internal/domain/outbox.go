@@ -30,7 +30,18 @@ const (
 const (
 	AggregateOrder          = "order"
 	EventOrderStatusChanged = "order.status_changed"
-	OrderEventVersion       = 1
+
+	// OrderEventVersion is 2 because the order amount changed unit: v1 carried
+	// a decimal rupee float, v2 carries integer paise. The field name did not
+	// change and both are valid JSON numbers, so nothing about the payload
+	// announces the difference — the version is the only thing that does, which
+	// is precisely why it is bumped rather than left alone.
+	//
+	// notification-service pins SupportedOrderEventVersion to the same number
+	// and dead-letters anything else, so a v1 event still in flight during a
+	// deploy is parked for inspection instead of being read as an amount 100x
+	// too small.
+	OrderEventVersion = 2
 )
 
 // OutboxMessage is one committed, not-yet-published event.

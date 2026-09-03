@@ -211,9 +211,15 @@ function randomUserID() {
 // SIPs are small and recurring, lump sums are large and occasional. Keeping
 // that shape matters: a flat amount distribution would not reproduce the mix of
 // row sizes and the fund-level skew the real write path sees.
-function randomAmount(type) {
-  const [min, max] = type === 'SIP' ? [500, 25000] : [10000, 2500000];
-  return Math.round((Math.random() * (max - min) + min) * 100) / 100;
+//
+// Amounts are integer PAISE. The API takes an integer and rejects a decimal
+// with a 400, so the old `Math.round(x * 100) / 100` here would have failed
+// every request in the run — and, because the failures would all be 400s, it
+// would have looked like a load result rather than a broken generator.
+function randomAmountPaise(type) {
+  // ₹500–₹25,000 for a SIP; ₹10,000–₹25,00,000 for a lump sum.
+  const [min, max] = type === 'SIP' ? [50000, 2500000] : [1000000, 250000000];
+  return randomInt(min, max);
 }
 
 function newOrderPayload(idempotencyKey, userID) {
@@ -221,7 +227,7 @@ function newOrderPayload(idempotencyKey, userID) {
   return {
     user_id: userID,
     fund_id: FUNDS[randomInt(0, FUNDS.length - 1)],
-    amount: randomAmount(type),
+    amount: randomAmountPaise(type),
     type: type,
     idempotency_key: idempotencyKey,
   };

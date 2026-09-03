@@ -24,6 +24,72 @@ spec:
         app: order-service
     spec:
       terminationGracePeriodSeconds: 45
+
+      # Schema migrations run as an init container, not on application startup.
+      #
+      # This is what replaces AutoMigrate in Kubernetes, and the reason it is an
+      # init container is the replica count above: with replicas: 2, boot-time
+      # migration means two pods executing DDL against one database at the same
+      # moment. golang-migrate holds a Postgres advisory lock, so the second
+      # would block rather than corrupt — but the pod would sit there failing
+      # its readiness probe while it waited, and the failure mode gets worse
+      # with every replica added.
+      #
+      # An init container fails the pod outright if the migration fails, so a
+      # bad migration stops the rollout instead of producing a Deployment that
+      # is half on the new schema. Kubernetes retries it with the pod's restart
+      # policy, and `up` is idempotent, so a retry after a partial network
+      # failure is safe.
+      #
+      # For a large table this belongs in a Job that runs before the rollout
+      # rather than in every pod; the init container is right while migrations
+      # are fast, which is the case for everything in migrations/ today.
+      initContainers:
+        - name: migrate
+          image: migrate/migrate:v4.17.1
+          args:
+            - -path=/migrations
+            - -database=$(FUNDKIT_MIGRATE_URL)
+            - up
+          env:
+            # Built from the same secret the service reads, so the migration
+            # and the application can never be pointed at different databases.
+            # x-migrations-table namespaces the bookkeeping: api-gateway shares
+            # this database and tracks its own schema separately.
+            - name: FUNDKIT_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fundkit-secrets
+                  key: FUNDKIT_DB_URL
+            - name: FUNDKIT_MIGRATE_URL
+              value: $(FUNDKIT_DB_URL)&x-migrations-table=order_service_schema_migrations
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+
+      volumes:
+        # The .sql files are mounted from a ConfigMap generated directly from
+        # the migrations directory, so the cluster runs the same bytes that are
+        # in the repository and there is no second copy to keep in sync:
+        #
+        #   make migrate-configmap | kubectl apply -f -
+        - name: migrations
+          configMap:
+            name: fundkit-order-migrations
+
       containers:
         - name: order-service
           image: fundkit/order-service:latest

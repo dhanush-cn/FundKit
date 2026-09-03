@@ -117,7 +117,7 @@ func TestIntegrationPublishedEventIsReadableByAConsumer(t *testing.T) {
 		UserEmail: "dhanush@example.com",
 		UserPhone: "+919876543210",
 		FundID:    "quant-small-cap-fund",
-		Amount:    5000,
+		Amount:    500000, // paise: ₹5,000.00
 		Type:      domain.TypeSIP,
 		Status:    domain.StatusExecuted,
 	}
@@ -177,8 +177,20 @@ func TestIntegrationPublishedEventIsReadableByAConsumer(t *testing.T) {
 	if err := json.Unmarshal(message.Value, &event); err != nil {
 		t.Fatalf("decode event: %v", err)
 	}
-	if event.EventType != EventOrderStatusChanged || event.Version != 1 {
+	// Asserted against the constant rather than a literal. This test hardcoded
+	// `!= 1` and broke when the envelope went to v2 for the paise change —
+	// which is the failure mode a literal guarantees: the test has to be edited
+	// every time the contract moves, and editing it is how a real version
+	// regression gets waved through.
+	if event.EventType != EventOrderStatusChanged || event.Version != domain.OrderEventVersion {
 		t.Fatalf("envelope = %+v", event)
+	}
+	// The amount is the payload field the v2 bump exists for, so the round trip
+	// has to prove the exact integer survives — not merely that something
+	// numeric arrived.
+	if event.Order.Amount != order.Amount {
+		t.Fatalf("amount did not survive the round trip: got %d paise, want %d",
+			event.Order.Amount.Paise(), order.Amount.Paise())
 	}
 	if event.Order.UserEmail != order.UserEmail || event.Order.UserPhone != order.UserPhone {
 		t.Fatalf("contact details did not survive the round trip: %+v", event.Order)
