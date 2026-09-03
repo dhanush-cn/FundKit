@@ -1,10 +1,31 @@
+// FundKit internal service contract.
+//
+// Engineered by Dhanush C N (github.com/dhanush-cn)
+//
+// Regenerate the Go stubs into each consuming service with:
+//   protoc --proto_path=proto \
+//          --go_out=order-service/pb     --go_opt=paths=source_relative \
+//          --go-grpc_out=order-service/pb --go-grpc_opt=paths=source_relative \
+//          proto/fundkit.proto
+// (repeat with portfolio-service/pb as the output directory)
+//
+// Why gRPC here: order-service calls portfolio-service on the synchronous read
+// path, where a binary, schema-checked contract with generated clients and
+// first-class deadlines beats hand-rolled JSON over HTTP. State *changes* are
+// published to Kafka instead, so this file stays a query contract.
+
 syntax = "proto3";
 
 package fundkit;
+
 option go_package = "./pb";
 
+// PortfolioService values a user's mutual fund holdings.
 service PortfolioService {
+  // GetPortfolio returns current holdings marked to the latest NAV.
   rpc GetPortfolio(PortfolioRequest) returns (PortfolioResponse);
+
+  // GetUserPnL returns holdings enriched with unrealized profit and loss.
   rpc GetUserPnL(PnLRequest) returns (PnLResponse);
 }
 

@@ -1,4 +1,4 @@
-module order-service
+module github.com/dhanush-cn/fundkit/order-service
 
 go 1.25.0
 

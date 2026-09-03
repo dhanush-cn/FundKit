@@ -1,4 +1,4 @@
-module portfolio-service
+module github.com/dhanush-cn/fundkit/portfolio-service
 
 go 1.25.0
 
