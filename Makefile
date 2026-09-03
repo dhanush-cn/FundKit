@@ -3,7 +3,7 @@
 
 SERVICES := api-gateway order-service portfolio-service notification-service
 
-.PHONY: help up down logs build test test-integration test-frontend ci vet fmt tidy metrics monitoring
+.PHONY: help up down logs build test test-integration test-frontend load-test load-test-smoke ci vet fmt tidy metrics monitoring
 
 help:
 	@echo "up     - start the full stack with docker compose"
@@ -13,6 +13,8 @@ help:
 	@echo "test   - run every Go unit test suite"
 	@echo "test-integration - run the Postgres/Redis/Kafka integration suites"
 	@echo "test-frontend    - type check, lint and test the dashboard"
+	@echo "load-test        - k6 load and idempotency test against POST /orders"
+	@echo "load-test-smoke  - the same assertions at 20 VUs for one minute"
 	@echo "ci     - the local approximation of the CI pipeline"
 	@echo "vet    - run go vet across all modules"
 	@echo "fmt    - gofmt every module"
@@ -55,6 +57,19 @@ test-integration:
 
 test-frontend:
 	cd frontend && npm ci && npm run typecheck && npm run lint && npm test
+
+# The gateway's per-IP limiter defaults to 5 rps, and a load generator is one
+# IP. Raise it for the run or you are benchmarking the rate limiter, not the
+# order path. See perf/README.md.
+load-test:
+	@mkdir -p perf/results
+	@command -v k6 >/dev/null || { echo "k6 not installed: https://k6.io/docs/get-started/installation/"; exit 1; }
+	k6 run perf/load_test.js
+
+load-test-smoke:
+	@mkdir -p perf/results
+	@command -v k6 >/dev/null || { echo "k6 not installed: https://k6.io/docs/get-started/installation/"; exit 1; }
+	TARGET_VUS=20 RAMP_UP=20s HOLD=30s RAMP_DOWN=10s RACE_RATE=2 k6 run perf/load_test.js
 
 # Each service publishes its admin listener on a distinct host port purely so
 # they can be curled side by side during development. Inside the compose network
