@@ -76,6 +76,10 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+      # Admin listener. Published on a distinct host port only so you can curl
+      # it during development; inside the network Prometheus scrapes :9100
+      # directly and nothing needs to be published at all.
+      - "9101:9100"
     depends_on:
       order-service:
         condition: service_started
@@ -84,6 +88,7 @@ services:
     environment:
       FUNDKIT_SERVICE_NAME: api-gateway
       FUNDKIT_HTTP_PORT: "8080"
+      FUNDKIT_METRICS_PORT: "9100"
       FUNDKIT_LOG_LEVEL: info
       FUNDKIT_JWT_SECRET: fundkit-local-dev-secret-change-me
       FUNDKIT_JWT_TTL: 24h
@@ -103,6 +108,7 @@ services:
     restart: unless-stopped
     ports:
       - "8081:8081"
+      - "9102:9100"
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,6 +119,7 @@ services:
     environment:
       FUNDKIT_SERVICE_NAME: order-service
       FUNDKIT_HTTP_PORT: "8081"
+      FUNDKIT_METRICS_PORT: "9100"
       FUNDKIT_LOG_LEVEL: info
       FUNDKIT_DB_URL: postgres://fundkit:password@postgres:5432/fundkit_db?sslmode=disable
       FUNDKIT_REDIS_URL: redis:6379
@@ -133,6 +140,7 @@ services:
     ports:
       - "8082:8082"
       - "50051:50051"
+      - "9103:9100"
     depends_on:
       redis:
         condition: service_healthy
@@ -140,6 +148,7 @@ services:
       FUNDKIT_SERVICE_NAME: portfolio-service
       FUNDKIT_GRPC_PORT: "50051"
       FUNDKIT_HTTP_PORT: "8082"
+      FUNDKIT_METRICS_PORT: "9100"
       FUNDKIT_LOG_LEVEL: info
       FUNDKIT_REDIS_URL: redis:6379
       FUNDKIT_NAV_CACHE_TTL: 30s
@@ -149,12 +158,14 @@ services:
     restart: unless-stopped
     ports:
       - "8083:8083"
+      - "9104:9100"
     depends_on:
       kafka:
         condition: service_healthy
     environment:
       FUNDKIT_SERVICE_NAME: notification-service
       FUNDKIT_HTTP_PORT: "8083"
+      FUNDKIT_METRICS_PORT: "9100"
       FUNDKIT_LOG_LEVEL: info
       FUNDKIT_KAFKA_BROKERS: kafka:9092
       FUNDKIT_KAFKA_ORDER_TOPIC: order_events
@@ -174,20 +185,52 @@ services:
 
   # ---------------------------------------------------------------- monitoring
   prometheus:
-    image: prom/prometheus
+    # Pinned rather than :latest. A monitoring stack that silently changes
+    # underneath you is the one thing you cannot debug with monitoring.
+    image: prom/prometheus:v2.53.0
     restart: unless-stopped
     ports:
       - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      # Lets `curl -XPOST localhost:9090/-/reload` pick up an edited scrape
+      # config without restarting the container and losing the head block.
+      - --web.enable-lifecycle
+    depends_on:
+      - api-gateway
+      - order-service
+      - portfolio-service
+      - notification-service
 
   grafana:
-    image: grafana/grafana
+    image: grafana/grafana:11.1.0
     restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
+      GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
+      # Local development only: skips the login wall so the dashboard opens on
+      # the first click. Never do this anywhere real.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      # The datasource and the dashboard are provisioned from files in git, so a
+      # fresh `docker compose up` produces a working dashboard with no clicking.
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
     depends_on:
       - prometheus
 
 volumes:
   postgres-data:
+  prometheus-data:
+  grafana-data:

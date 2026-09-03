@@ -13,6 +13,13 @@ spec:
       app: order-service
   template:
     metadata:
+      annotations:
+        # Pod discovery: a prometheus.io/scrape relabel rule turns these three
+        # lines into a scrape target, so a new replica is monitored the moment
+        # it schedules and nothing has to be added to a static config.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: "/metrics"
       labels:
         app: order-service
     spec:
@@ -23,6 +30,8 @@ spec:
           ports:
             - name: http
               containerPort: 8081
+            - name: metrics
+              containerPort: 9100
           envFrom:
             - configMapRef:
                 name: fundkit-config
@@ -31,6 +40,8 @@ spec:
           env:
             - name: FUNDKIT_HTTP_PORT
               value: "8081"
+            - name: FUNDKIT_METRICS_PORT
+              value: "9100"
           livenessProbe:
             httpGet:
               path: /healthz

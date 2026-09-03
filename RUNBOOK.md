@@ -86,6 +86,32 @@ Expect: `{"dependencies":{"postgres":"UP","redis":"UP"},"service":"order-service
 
 Open **<http://localhost:5173>** in a browser.
 
+**5. Metrics are being exported**
+
+```powershell
+curl.exe http://localhost:9102/metrics | findstr /B "http_requests_total"
+```
+
+Expect a handful of `http_requests_total{...}` lines. On macOS or Linux, `make metrics` does this
+for all four services at once.
+
+An empty result is not a failure — it means the service has served no traffic yet, and Prometheus
+counters only appear once they have been incremented at least once. Place an order (Part 3) and
+try again.
+
+**6. Prometheus has found every target**
+
+Open **<http://localhost:9090/targets>**. All five jobs (`prometheus`, `api-gateway`,
+`order-service`, `portfolio-service`, `notification-service`) should read **UP**. A target stuck in
+`DOWN` with `connection refused` means that service is not running; a `context deadline exceeded`
+means it is running but wedged.
+
+**7. The dashboard is provisioned**
+
+Open **<http://localhost:3000/d/fundkit-overview>** (`admin` / `admin`). The panels are empty until
+traffic flows, which is what Part 3 produces. Nothing needs to be imported by hand — the datasource
+and the dashboard are both loaded from `monitoring/` at boot.
+
 ---
 
 ## Part 3 — Walk through the system
@@ -433,8 +459,16 @@ The same checks run in GitHub Actions on every push and pull request — see
 | 6380 | Redis (6379 inside the Docker network) |
 | 29092 | Kafka (from your machine) |
 | 9092 | Kafka (inside the Docker network only) |
+| 9101 | api-gateway `/metrics` (`:9100` inside the Docker network) |
+| 9102 | order-service `/metrics` (`:9100` inside the Docker network) |
+| 9103 | portfolio-service `/metrics` (`:9100` inside the Docker network) |
+| 9104 | notification-service `/metrics` (`:9100` inside the Docker network) |
 | 9090 | Prometheus |
 | 3000 | Grafana (`admin` / `admin`) |
+
+Every service serves `/metrics` on the same internal port, `9100`. The distinct host ports above
+exist only so all four can be curled side by side from your machine; Prometheus scrapes `:9100`
+directly over the Docker network and needs none of them published.
 
 ---
 
@@ -446,3 +480,4 @@ The same checks run in GitHub Actions on every push and pull request — see
 | `/readyz` | Readiness — dependencies are actually reachable. Failing this only removes the pod from the load balancer. |
 | `/health` | Legacy alias for `/healthz`, kept for compatibility. |
 | `/services/health` | Gateway-only: probes every upstream's `/readyz` concurrently and aggregates, so the dashboard reflects dependency health rather than just live processes. |
+| `/metrics` | Prometheus exposition, on the **admin port** (`:9100`), never on the traffic port. Deliberately outside the auth, CORS and rate-limit chain, and never published through an ingress. |

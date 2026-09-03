@@ -1,0 +1,23 @@
+# Grafana dashboard provisioning
+# Engineered by Dhanush C N (github.com/dhanush-cn)
+#
+# The dashboard lives in git as JSON and is loaded from disk, so it is reviewed
+# like code and cannot drift into an undocumented state that only exists in
+# somebody's browser.
+
+apiVersion: 1
+
+providers:
+  - name: fundkit
+    orgId: 1
+    folder: FundKit
+    type: file
+    disableDeletion: false
+    # allowUiUpdates lets you experiment in the browser; the file on disk stays
+    # the source of truth and wins on the next restart. Export and commit any
+    # change you want to keep.
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
