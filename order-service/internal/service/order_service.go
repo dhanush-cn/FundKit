@@ -13,14 +13,19 @@ import (
 	"time"
 
 	"github.com/dhanush-cn/fundkit/order-service/internal/domain"
+	"github.com/dhanush-cn/fundkit/order-service/internal/platform/trace"
 )
 
 // Repository is the persistence port required by the order use cases.
+//
+// Both mutating methods take an OutboxBuilder: writing the event is not an
+// optional follow-up step a caller might forget, it is part of the method's
+// contract and of the same transaction.
 type Repository interface {
-	Create(ctx context.Context, order *domain.Order) error
+	CreateWithOutbox(ctx context.Context, order *domain.Order, build domain.OutboxBuilder) error
 	GetByID(ctx context.Context, id string) (*domain.Order, error)
 	List(ctx context.Context, limit int) ([]domain.Order, error)
-	UpdateStatus(ctx context.Context, id string, expected, next domain.OrderStatus) error
+	UpdateStatusWithOutbox(ctx context.Context, id string, expected, next domain.OrderStatus, build domain.OutboxBuilder) (*domain.Order, error)
 	Delete(ctx context.Context, id string) error
 }
 
@@ -31,16 +36,14 @@ type IdempotencyStore interface {
 	ReleaseIdempotency(ctx context.Context, key string) error
 }
 
-// EventPublisher is the outbound event port backed by Kafka in production.
-type EventPublisher interface {
-	PublishOrderStatusChanged(ctx context.Context, order domain.Order) error
-}
+// There is deliberately no EventPublisher port here any more. Publication is
+// the relay's job, and removing the port removes the possibility: after this
+// change there is no code path from an HTTP request to the broker.
 
-// OrderService orchestrates persistence, idempotency and event publication.
+// OrderService orchestrates persistence, idempotency and event recording.
 type OrderService struct {
 	repo      Repository
 	idem      IdempotencyStore
-	events    EventPublisher
 	logger    *slog.Logger
 	workerTTL time.Duration
 
@@ -49,18 +52,28 @@ type OrderService struct {
 	inFlight sync.WaitGroup
 }
 
-func NewOrderService(repo Repository, idem IdempotencyStore, events EventPublisher, logger *slog.Logger) *OrderService {
+func NewOrderService(repo Repository, idem IdempotencyStore, logger *slog.Logger) *OrderService {
 	return &OrderService{
 		repo:      repo,
 		idem:      idem,
-		events:    events,
 		logger:    logger,
 		workerTTL: 30 * time.Second,
 	}
 }
 
-// Place reserves the idempotency key, persists the order, emits the creation
-// event and hands the order to the asynchronous lifecycle worker.
+// outboxFor captures the correlation id from the request context so the event
+// written inside the transaction carries the same x-request-id as the HTTP call
+// that caused it. This is what keeps a trace intact across the asynchronous
+// seam: the id survives in a database column, not in a goroutine.
+func (s *OrderService) outboxFor(ctx context.Context) domain.OutboxBuilder {
+	requestID := trace.FromContext(ctx)
+	return func(order domain.Order) (domain.OutboxMessage, error) {
+		return domain.NewOrderStatusChangedOutbox(order, requestID)
+	}
+}
+
+// Place reserves the idempotency key, persists the order together with its
+// creation event, and hands the order to the asynchronous lifecycle worker.
 //
 // The reservation is taken *before* the insert: Redis is the cheap, fast guard
 // and the unique index on the key is the authoritative one. If the insert
@@ -86,7 +99,10 @@ func (s *OrderService) Place(ctx context.Context, input domain.NewOrder) (*domai
 		IdempotencyKey: input.IdempotencyKey,
 	}
 
-	if err := s.repo.Create(ctx, order); err != nil {
+	// The order row and its outbox row commit together. If this returns an
+	// error, neither exists — there is no window in which the order is durable
+	// but its event is not.
+	if err := s.repo.CreateWithOutbox(ctx, order, s.outboxFor(ctx)); err != nil {
 		if releaseErr := s.idem.ReleaseIdempotency(ctx, input.IdempotencyKey); releaseErr != nil {
 			s.logger.ErrorContext(ctx, "failed to release idempotency reservation",
 				slog.String("error", releaseErr.Error()))
@@ -94,7 +110,8 @@ func (s *OrderService) Place(ctx context.Context, input domain.NewOrder) (*domai
 		return nil, err
 	}
 
-	s.publish(ctx, *order)
+	// No publish call here any more: the event is already durable and the relay
+	// will have it on Kafka within one poll interval.
 	s.startLifecycle(ctx, order.ID)
 
 	s.logger.InfoContext(ctx, "order placed",
@@ -126,17 +143,17 @@ func (s *OrderService) UpdateStatus(ctx context.Context, id string, next domain.
 		return nil, err
 	}
 
-	if err := s.repo.UpdateStatus(ctx, id, current, next); err != nil {
+	updated, err := s.repo.UpdateStatusWithOutbox(ctx, id, current, next, s.outboxFor(ctx))
+	if err != nil {
 		return nil, err
 	}
 
-	s.publish(ctx, *order)
 	s.logger.InfoContext(ctx, "order status updated",
 		slog.String("order_id", id),
 		slog.String("from", string(current)),
 		slog.String("to", string(next)),
 	)
-	return order, nil
+	return updated, nil
 }
 
 // Delete removes an order that has not yet started processing.
@@ -192,7 +209,9 @@ func (s *OrderService) processLifecycle(ctx context.Context, orderID string) {
 		return
 	}
 
-	if err := s.repo.UpdateStatus(ctx, orderID, domain.StatusPending, domain.StatusProcessing); err != nil {
+	build := s.outboxFor(ctx)
+
+	if _, err := s.repo.UpdateStatusWithOutbox(ctx, orderID, domain.StatusPending, domain.StatusProcessing, build); err != nil {
 		// A losing race here means an operator moved the order first, which is
 		// a legitimate outcome rather than an error to shout about.
 		if errors.Is(err, domain.ErrInvalidTransition) {
@@ -204,37 +223,20 @@ func (s *OrderService) processLifecycle(ctx context.Context, orderID string) {
 			slog.String("order_id", orderID), slog.String("error", err.Error()))
 		return
 	}
-	order.Status = domain.StatusProcessing
-	s.publish(ctx, *order)
 
 	final := domain.StatusExecuted
 	if order.Amount <= 0 {
 		final = domain.StatusFailed
 	}
 
-	if err := s.repo.UpdateStatus(ctx, orderID, domain.StatusProcessing, final); err != nil {
+	if _, err := s.repo.UpdateStatusWithOutbox(ctx, orderID, domain.StatusProcessing, final, build); err != nil {
 		s.logger.ErrorContext(ctx, "failed to finalize order",
 			slog.String("order_id", orderID), slog.String("error", err.Error()))
 		return
 	}
-	order.Status = final
-	s.publish(ctx, *order)
 
 	if err := s.idem.ConfirmIdempotency(ctx, order.IdempotencyKey); err != nil {
 		s.logger.WarnContext(ctx, "failed to confirm idempotency key",
 			slog.String("order_id", orderID), slog.String("error", err.Error()))
-	}
-}
-
-// publish never fails the caller: losing an event must not roll back a
-// committed order. The failure is logged loudly for the outbox/retry work that
-// a production deployment would layer on top.
-func (s *OrderService) publish(ctx context.Context, order domain.Order) {
-	if err := s.events.PublishOrderStatusChanged(ctx, order); err != nil {
-		s.logger.ErrorContext(ctx, "failed to publish order event",
-			slog.String("order_id", order.ID),
-			slog.String("status", string(order.Status)),
-			slog.String("error", err.Error()),
-		)
 	}
 }

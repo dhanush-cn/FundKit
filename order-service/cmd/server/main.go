@@ -21,6 +21,7 @@ import (
 	"github.com/dhanush-cn/fundkit/order-service/internal/messaging"
 	"github.com/dhanush-cn/fundkit/order-service/internal/platform/logging"
 	"github.com/dhanush-cn/fundkit/order-service/internal/portfolio"
+	"github.com/dhanush-cn/fundkit/order-service/internal/relay"
 	"github.com/dhanush-cn/fundkit/order-service/internal/repository"
 	"github.com/dhanush-cn/fundkit/order-service/internal/service"
 )
@@ -66,12 +67,31 @@ func run() error {
 	}
 	defer closeQuietly(logger, "portfolio-grpc", portfolioClient.Close)
 
+	outboxRepo := repository.NewOutboxRepository(db)
+
+	// The service no longer receives the publisher. It writes events to the
+	// outbox inside the same transaction as the order, and the relay below is
+	// the only thing in this process that talks to Kafka.
 	orderService := service.NewOrderService(
 		repository.NewOrderRepository(db),
 		redisClient,
-		publisher,
 		logger,
 	)
+
+	outboxRelay := relay.New(outboxRepo, publisher, relay.Config{
+		Interval:      cfg.Outbox.PollInterval,
+		BatchSize:     cfg.Outbox.BatchSize,
+		MaxAttempts:   cfg.Outbox.MaxAttempts,
+		MaxBackoff:    cfg.Outbox.MaxBackoff,
+		ShutdownFlush: cfg.Outbox.ShutdownFlush,
+	}, logger)
+
+	// The relay gets its own cancellation rather than sharing the signal
+	// context, so shutdown can stop it *after* the HTTP server and the
+	// lifecycle workers have finished writing their last outbox rows.
+	relayCtx, stopRelay := context.WithCancel(context.Background())
+	defer stopRelay()
+	go outboxRelay.Run(relayCtx)
 
 	router := handler.NewRouter(handler.RouterDeps{
 		Logger:         logger,
@@ -112,8 +132,14 @@ func run() error {
 		logger.Info("shutdown signal received, draining connections")
 	}
 
-	// Stop accepting new work, let in-flight requests finish, then wait for the
-	// detached order lifecycle workers before releasing the dependencies.
+	// Shutdown order matters, and this is the whole story:
+	//   1. stop accepting new HTTP work,
+	//   2. let the detached lifecycle workers commit their last outbox rows,
+	//   3. only then stop the relay, whose final flush publishes everything
+	//      steps 1 and 2 just committed,
+	//   4. and last, the deferred closers release Kafka, Redis and Postgres.
+	// Closing the publisher before the relay drains would make the flush
+	// silently publish nothing.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Service.ShutdownTimeout)
 	defer cancel()
 
@@ -121,6 +147,10 @@ func run() error {
 		logger.Error("graceful shutdown failed", slog.String("error", err.Error()))
 	}
 	orderService.Drain()
+
+	stopRelay()
+	outboxRelay.Wait()
+
 	logger.Info("order-service stopped cleanly")
 	return nil
 }

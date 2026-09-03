@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -23,19 +24,15 @@ import (
 	"github.com/dhanush-cn/fundkit/order-service/internal/platform/trace"
 )
 
-// EventType names the contract shared with notification-service.
-const EventOrderStatusChanged = "order.status_changed"
+// EventOrderStatusChanged and OrderEvent moved into the domain package so the
+// service layer can build an envelope inside a database transaction without
+// importing Kafka. These aliases keep every existing caller compiling and the
+// wire format byte-identical.
+const EventOrderStatusChanged = domain.EventOrderStatusChanged
 
 // OrderEvent is a versioned envelope. Wrapping the aggregate rather than
 // publishing it raw means new metadata can be added without breaking consumers.
-type OrderEvent struct {
-	EventID    string       `json:"event_id"`
-	EventType  string       `json:"event_type"`
-	Version    int          `json:"version"`
-	OccurredAt time.Time    `json:"occurred_at"`
-	RequestID  string       `json:"request_id,omitempty"`
-	Order      domain.Order `json:"order"`
-}
+type OrderEvent = domain.OrderEvent
 
 type Publisher struct {
 	writer *kafka.Writer
@@ -103,6 +100,47 @@ func (p *Publisher) PublishOrderStatusChanged(ctx context.Context, order domain.
 	p.logger.DebugContext(ctx, "order event published",
 		slog.String("order_id", order.ID),
 		slog.String("status", string(order.Status)),
+	)
+	return nil
+}
+
+// PublishOutbox writes an already-serialised outbox record to Kafka.
+//
+// It deliberately does no envelope construction: the bytes on the wire are
+// exactly the bytes that were committed alongside the order, so an event can
+// never drift from the state that produced it.
+//
+// Routing metadata travels in headers rather than payload fields, so consumers
+// that never parse the body can still trace and deduplicate. outbox-id in
+// particular is a stable, monotonic dedup key — the relay is at-least-once, so
+// notification-service must be able to recognise a replay.
+func (p *Publisher) PublishOutbox(ctx context.Context, msg domain.OutboxMessage) error {
+	if p == nil || p.writer == nil {
+		return nil
+	}
+
+	message := kafka.Message{
+		// Keying by aggregate id keeps every event for one order on one
+		// partition, which is what makes per-order ordering observable.
+		Key:   []byte(msg.AggregateID),
+		Value: msg.Payload,
+		Headers: []kafka.Header{
+			{Key: trace.HeaderKey, Value: []byte(msg.RequestID)},
+			{Key: "event-type", Value: []byte(msg.EventType)},
+			{Key: "aggregate-type", Value: []byte(msg.AggregateType)},
+			{Key: "outbox-id", Value: []byte(strconv.FormatInt(msg.ID, 10))},
+		},
+	}
+
+	if err := p.writer.WriteMessages(ctx, message); err != nil {
+		return fmt.Errorf("write outbox message %d: %w", msg.ID, err)
+	}
+
+	p.logger.DebugContext(ctx, "outbox message published",
+		slog.Int64("outbox_id", msg.ID),
+		slog.String("aggregate_id", msg.AggregateID),
+		slog.String("event_type", msg.EventType),
+		slog.String(trace.HeaderKey, msg.RequestID),
 	)
 	return nil
 }

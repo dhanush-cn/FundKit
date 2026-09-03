@@ -20,6 +20,7 @@ type Config struct {
 	Redis     RedisConfig
 	Kafka     KafkaConfig
 	Portfolio PortfolioConfig
+	Outbox    OutboxConfig
 }
 
 type ServiceConfig struct {
@@ -49,6 +50,15 @@ type RedisConfig struct {
 type KafkaConfig struct {
 	Brokers    []string
 	OrderTopic string
+}
+
+// OutboxConfig tunes the transactional outbox relay worker.
+type OutboxConfig struct {
+	PollInterval  time.Duration
+	BatchSize     int
+	MaxAttempts   int
+	MaxBackoff    time.Duration
+	ShutdownFlush time.Duration
 }
 
 type PortfolioConfig struct {
@@ -91,6 +101,13 @@ func Load() (Config, error) {
 			DialTimeout: envDuration("PORTFOLIO_DIAL_TIMEOUT", 5*time.Second),
 			CallTimeout: envDuration("PORTFOLIO_CALL_TIMEOUT", 3*time.Second),
 		},
+		Outbox: OutboxConfig{
+			PollInterval:  envDuration("OUTBOX_POLL_INTERVAL", time.Second),
+			BatchSize:     envInt("OUTBOX_BATCH_SIZE", 100),
+			MaxAttempts:   envInt("OUTBOX_MAX_ATTEMPTS", 10),
+			MaxBackoff:    envDuration("OUTBOX_MAX_BACKOFF", 30*time.Second),
+			ShutdownFlush: envDuration("OUTBOX_SHUTDOWN_FLUSH", 5*time.Second),
+		},
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -108,6 +125,12 @@ func (c Config) validate() error {
 	}
 	if c.Redis.Addr == "" {
 		return fmt.Errorf("config: FUNDKIT_REDIS_URL must be set")
+	}
+	if c.Outbox.BatchSize <= 0 {
+		return fmt.Errorf("config: FUNDKIT_OUTBOX_BATCH_SIZE must be greater than zero")
+	}
+	if c.Outbox.PollInterval <= 0 {
+		return fmt.Errorf("config: FUNDKIT_OUTBOX_POLL_INTERVAL must be greater than zero")
 	}
 	return nil
 }

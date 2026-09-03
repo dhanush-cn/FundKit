@@ -120,6 +120,12 @@ services:
       FUNDKIT_KAFKA_ORDER_TOPIC: order_events
       FUNDKIT_IDEMPOTENCY_TTL: 24h
       FUNDKIT_PORTFOLIO_GRPC_URL: portfolio-service:50051
+      # Transactional outbox relay.
+      FUNDKIT_OUTBOX_POLL_INTERVAL: 1s
+      FUNDKIT_OUTBOX_BATCH_SIZE: "100"
+      FUNDKIT_OUTBOX_MAX_ATTEMPTS: "10"
+      FUNDKIT_OUTBOX_MAX_BACKOFF: 30s
+      FUNDKIT_OUTBOX_SHUTDOWN_FLUSH: 5s
 
   portfolio-service:
     build: ./portfolio-service

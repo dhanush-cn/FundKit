@@ -54,14 +54,24 @@ func testDB(t *testing.T) *gorm.DB {
 	t.Cleanup(func() {
 		// Leave the schema behind but never the rows: the next test must not
 		// inherit this one's state.
+		db.Exec("DELETE FROM outbox")
 		db.Exec("DELETE FROM orders")
 		_ = ClosePostgres(db)
 	})
 
+	if err := db.Exec("DELETE FROM outbox").Error; err != nil {
+		t.Fatalf("clean the outbox table: %v", err)
+	}
 	if err := db.Exec("DELETE FROM orders").Error; err != nil {
 		t.Fatalf("clean the orders table: %v", err)
 	}
 	return db
+}
+
+// testOutbox is the event builder the service layer supplies in production, so
+// these tests exercise the real transactional path rather than a shortcut.
+func testOutbox(order domain.Order) (domain.OutboxMessage, error) {
+	return domain.NewOrderStatusChangedOutbox(order, "integration-trace")
 }
 
 func newOrder(key string) *domain.Order {
@@ -83,7 +93,7 @@ func TestIntegrationCreateAssignsAnIDAndPersistsContactDetails(t *testing.T) {
 	ctx := context.Background()
 
 	order := newOrder("integration-key-1")
-	if err := repo.Create(ctx, order); err != nil {
+	if err := repo.CreateWithOutbox(ctx, order, testOutbox); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if order.ID == "" {
@@ -106,11 +116,11 @@ func TestIntegrationDuplicateIdempotencyKeyIsRejectedByTheDatabase(t *testing.T)
 	repo := NewOrderRepository(testDB(t))
 	ctx := context.Background()
 
-	if err := repo.Create(ctx, newOrder("integration-key-dup")); err != nil {
+	if err := repo.CreateWithOutbox(ctx, newOrder("integration-key-dup"), testOutbox); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
 
-	err := repo.Create(ctx, newOrder("integration-key-dup"))
+	err := repo.CreateWithOutbox(ctx, newOrder("integration-key-dup"), testOutbox)
 	if !errors.Is(err, domain.ErrDuplicateOrder) {
 		t.Fatalf("error = %v, want ErrDuplicateOrder from the unique index", err)
 	}
@@ -123,7 +133,7 @@ func TestIntegrationConditionalUpdateSerialisesConcurrentTransitions(t *testing.
 	ctx := context.Background()
 
 	order := newOrder("integration-key-race")
-	if err := repo.Create(ctx, order); err != nil {
+	if err := repo.CreateWithOutbox(ctx, order, testOutbox); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
@@ -141,7 +151,7 @@ func TestIntegrationConditionalUpdateSerialisesConcurrentTransitions(t *testing.
 			defer wait.Done()
 			<-start
 
-			err := repo.UpdateStatus(ctx, order.ID, domain.StatusPending, domain.StatusProcessing)
+			_, err := repo.UpdateStatusWithOutbox(ctx, order.ID, domain.StatusPending, domain.StatusProcessing, testOutbox)
 			mu.Lock()
 			defer mu.Unlock()
 			if err == nil {
@@ -171,11 +181,11 @@ func TestIntegrationUpdateFromTheWrongStateIsRefused(t *testing.T) {
 	ctx := context.Background()
 
 	order := newOrder("integration-key-state")
-	if err := repo.Create(ctx, order); err != nil {
+	if err := repo.CreateWithOutbox(ctx, order, testOutbox); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	err := repo.UpdateStatus(ctx, order.ID, domain.StatusProcessing, domain.StatusExecuted)
+	_, err := repo.UpdateStatusWithOutbox(ctx, order.ID, domain.StatusProcessing, domain.StatusExecuted, testOutbox)
 	if !errors.Is(err, domain.ErrInvalidTransition) {
 		t.Fatalf("error = %v, want ErrInvalidTransition", err)
 	}
@@ -187,7 +197,7 @@ func TestIntegrationListIsNewestFirst(t *testing.T) {
 
 	for index, key := range []string{"integration-list-1", "integration-list-2", "integration-list-3"} {
 		order := newOrder(key)
-		if err := repo.Create(ctx, order); err != nil {
+		if err := repo.CreateWithOutbox(ctx, order, testOutbox); err != nil {
 			t.Fatalf("create %d: %v", index, err)
 		}
 		// Postgres timestamps have microsecond resolution; a pause keeps the
@@ -212,7 +222,7 @@ func TestIntegrationDeleteAndMissingRows(t *testing.T) {
 	ctx := context.Background()
 
 	order := newOrder("integration-key-delete")
-	if err := repo.Create(ctx, order); err != nil {
+	if err := repo.CreateWithOutbox(ctx, order, testOutbox); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if err := repo.Delete(ctx, order.ID); err != nil {

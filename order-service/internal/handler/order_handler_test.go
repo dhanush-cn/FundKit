@@ -26,6 +26,7 @@ func init() { gin.SetMode(gin.TestMode) }
 type memoryRepo struct {
 	mu     sync.Mutex
 	orders map[string]*domain.Order
+	outbox []domain.OutboxMessage
 	seq    int
 }
 
@@ -33,7 +34,7 @@ func newMemoryRepo() *memoryRepo {
 	return &memoryRepo{orders: make(map[string]*domain.Order)}
 }
 
-func (m *memoryRepo) Create(_ context.Context, order *domain.Order) error {
+func (m *memoryRepo) CreateWithOutbox(_ context.Context, order *domain.Order, build domain.OutboxBuilder) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -41,8 +42,15 @@ func (m *memoryRepo) Create(_ context.Context, order *domain.Order) error {
 	order.ID = "order-" + string(rune('a'+m.seq-1))
 	order.CreatedAt = time.Now()
 	order.UpdatedAt = order.CreatedAt
+
+	msg, err := build(*order)
+	if err != nil {
+		return err
+	}
+
 	stored := *order
 	m.orders[order.ID] = &stored
+	m.outbox = append(m.outbox, msg)
 	return nil
 }
 
@@ -69,19 +77,32 @@ func (m *memoryRepo) List(_ context.Context, _ int) ([]domain.Order, error) {
 	return list, nil
 }
 
-func (m *memoryRepo) UpdateStatus(_ context.Context, id string, expected, next domain.OrderStatus) error {
+func (m *memoryRepo) UpdateStatusWithOutbox(_ context.Context, id string, expected, next domain.OrderStatus, build domain.OutboxBuilder) (*domain.Order, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	order, ok := m.orders[id]
 	if !ok {
-		return domain.ErrOrderNotFound
+		return nil, domain.ErrOrderNotFound
 	}
 	if order.Status != expected {
-		return domain.ErrInvalidTransition
+		return nil, domain.ErrInvalidTransition
 	}
-	order.Status = next
-	return nil
+
+	candidate := *order
+	candidate.Status = next
+	candidate.UpdatedAt = time.Now()
+
+	msg, err := build(candidate)
+	if err != nil {
+		return nil, err
+	}
+
+	*order = candidate
+	m.outbox = append(m.outbox, msg)
+
+	copied := candidate
+	return &copied, nil
 }
 
 func (m *memoryRepo) Delete(_ context.Context, id string) error {
@@ -122,15 +143,12 @@ func (m *memoryIdem) ReleaseIdempotency(_ context.Context, key string) error {
 	return nil
 }
 
-type nullPublisher struct{}
-
-func (nullPublisher) PublishOrderStatusChanged(context.Context, domain.Order) error { return nil }
-
 func newOrderTestRouter() (*gin.Engine, *service.OrderService) {
+	// No publisher: the service records events into the repository's outbox
+	// inside the same call, and the relay is what would put them on Kafka.
 	orders := service.NewOrderService(
 		newMemoryRepo(),
 		newMemoryIdem(),
-		nullPublisher{},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
 
