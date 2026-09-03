@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+// FundKit Control Center — order control plane dashboard.
+// Engineered by Dhanush C N (github.com/dhanush-cn)
+import { useCallback, useMemo, useState } from 'react';
+import type { FormEvent } from 'react';
 import { motion } from 'framer-motion';
 import {
   Activity,
@@ -13,281 +16,92 @@ import {
   ShieldCheck,
   Sparkles,
 } from 'lucide-react';
+
+import { AuthPanel } from './components/AuthPanel';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { useAuth } from './hooks/useAuth';
+import { useOrders } from './hooks/useOrders';
+import { usePortfolio } from './hooks/usePortfolio';
+import { useServiceHealth } from './hooks/useServiceHealth';
+import { API_BASE_URL } from './lib/api';
+import { formatCurrency, formatDate, statusTone } from './lib/format';
+import type { OrderType } from './types';
 import './App.css';
 
-type OrderStatus = 'PENDING' | 'PROCESSING' | 'EXECUTED' | 'FAILED';
-type OrderType = 'SIP' | 'LUMPSUM';
-type ServiceStatus = 'UP' | 'DOWN';
-
-interface Order {
-  id: string;
-  user_id: string;
-  fund_id: string;
-  amount: number;
-  type: OrderType;
-  status: OrderStatus;
-  idempotency_key: string;
-  created_at: string;
-  updated_at: string;
-}
-
-interface ServiceHealthItem {
-  service: string;
-  url: string;
-  status: ServiceStatus;
-}
-
-interface ServiceHealthResponse {
-  status: 'UP' | 'DEGRADED';
-  services: ServiceHealthItem[];
-}
+const AUTHOR = 'Dhanush C N';
+const AUTHOR_URL = 'https://github.com/dhanush-cn';
 
 interface OrderFormState {
-  userId: string;
   fundId: string;
   amount: string;
   type: OrderType;
   idempotencyKey: string;
 }
 
-interface PnLHolding {
-  fund_id: string;
-  fund_name: string;
-  units: number;
-  invested_amount: number;
-  nav: number;
-  current_value: number;
-  unrealized_gain: number;
+function newIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `fundkit-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
-
-interface PnLResponse {
-  user_id: string;
-  total_value: number;
-  total_unrealized_gain: number;
-  holdings: PnLHolding[];
-}
-
-const apiBase = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080').replace(/\/$/, '');
-let globalToken = localStorage.getItem('fundkit_jwt');
 
 const initialForm = (): OrderFormState => ({
-  userId: 'user-001',
   fundId: 'quant-small-cap-fund',
   amount: '5000',
   type: 'SIP',
-  idempotencyKey: crypto.randomUUID(),
+  idempotencyKey: newIdempotencyKey(),
 });
 
-async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  
-  if (globalToken) {
-    headers['Authorization'] = `Bearer ${globalToken}`;
-  }
-
-  const response = await fetch(`${apiBase}${path}`, {
-    headers: {
-      ...headers,
-      ...(init?.headers ?? {}),
-    },
-    ...init,
-  });
-
-  let payload: any = null;
-  try {
-    payload = await response.json();
-  } catch {
-    payload = null;
-  }
-
-  if (!response.ok) {
-    throw new Error(payload?.error ?? `Request failed with ${response.status}`);
-  }
-
-  return payload as T;
-}
-
-function formatCurrency(amount: number) {
-  return new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency: 'INR',
-    maximumFractionDigits: 0,
-  }).format(amount);
-}
-
-function formatDate(value: string) {
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
-}
-
-function statusTone(status: OrderStatus) {
-  switch (status) {
-    case 'PENDING':
-      return 'pending';
-    case 'PROCESSING':
-      return 'processing';
-    case 'EXECUTED':
-      return 'executed';
-    case 'FAILED':
-      return 'failed';
-  }
-}
-
 export default function App() {
-  const [token, setToken] = useState<string | null>(globalToken);
-  const [orders, setOrders] = useState<Order[]>([]);
-  const [services, setServices] = useState<ServiceHealthItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [form, setForm] = useState<OrderFormState>(() => initialForm());
-  const [pnlUserId, setPnlUserId] = useState('user-1');
-  const [pnl, setPnl] = useState<PnLResponse | null>(null);
-  const [pnlLoading, setPnlLoading] = useState(false);
-  const [pnlError, setPnlError] = useState<string | null>(null);
-  const [loginLoading, setLoginLoading] = useState(false);
+  const auth = useAuth();
+  const isAuthenticated = Boolean(auth.token);
 
-  const orderMetrics = useMemo(() => {
-    const totalInvested = orders.reduce((sum, order) => sum + order.amount, 0);
-    const pending = orders.filter((order) => order.status === 'PENDING').length;
-    const processing = orders.filter((order) => order.status === 'PROCESSING').length;
-    const executed = orders.filter((order) => order.status === 'EXECUTED').length;
-    const failed = orders.filter((order) => order.status === 'FAILED').length;
-    return { totalInvested, pending, processing, executed, failed };
-  }, [orders]);
+  const orders = useOrders({ enabled: isAuthenticated, onUnauthorized: auth.logout });
+  const health = useServiceHealth(isAuthenticated);
+  const portfolio = usePortfolio();
 
-  const allServicesHealthy = services.length > 0 && services.every((service) => service.status === 'UP');
+  const [form, setForm] = useState<OrderFormState>(initialForm);
+  const [pnlUserId, setPnlUserId] = useState('');
 
-  useEffect(() => {
-    if (!token) return;
-    void refreshAll();
-    const timer = window.setInterval(() => {
-      void refreshAll();
-    }, 15000);
-    return () => window.clearInterval(timer);
-  }, [token]);
+  // The signed-in account is the subject of everything on this screen. The
+  // gateway overrides an order's user id with the verified token subject
+  // regardless, so anything else shown here would be a lie. Deriving the
+  // defaults beats copying them into state with an effect.
+  const signedInUserId = auth.user?.id ?? '';
+  const pnlUser = useMemo(() => pnlUserId || signedInUserId, [pnlUserId, signedInUserId]);
 
-  async function refreshAll() {
-    try {
-      setError(null);
-      setLoading(true);
-      const [health, orderList] = await Promise.all([
-        apiRequest<ServiceHealthResponse>('/services/health'),
-        apiRequest<Order[]>('/orders'),
-      ]);
-      setServices(health.services);
-      setOrders(orderList.sort((left, right) => right.created_at.localeCompare(left.created_at)));
-    } catch (refreshError) {
-      setError(refreshError instanceof Error ? refreshError.message : 'Unable to load FundKit data');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handleLogin() {
-    setLoginLoading(true);
-    setError(null);
-    try {
-      const data = await apiRequest<{token: string}>('/login', { method: 'POST' });
-      localStorage.setItem('fundkit_jwt', data.token);
-      globalToken = data.token;
-      setToken(data.token);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
-    } finally {
-      setLoginLoading(false);
-    }
-  }
-
-  function handleLogout() {
-    localStorage.removeItem('fundkit_jwt');
-    globalToken = null;
-    setToken(null);
-    setOrders([]);
-    setPnl(null);
-  }
-
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setSubmitting(true);
-    setError(null);
-
-    try {
-      await apiRequest<Order>('/orders', {
-        method: 'POST',
-        body: JSON.stringify({
-          user_id: form.userId,
-          fund_id: form.fundId,
-          amount: Number(form.amount),
-          type: form.type,
-          idempotency_key: form.idempotencyKey,
-        }),
+  const handleSubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const placed = await orders.placeOrder({
+        user_id: signedInUserId,
+        fund_id: form.fundId,
+        amount: Number(form.amount),
+        type: form.type,
+        idempotency_key: form.idempotencyKey,
       });
-      setForm((current) => ({ ...current, amount: '5000', idempotencyKey: crypto.randomUUID() }));
-      await refreshAll();
-    } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : 'Unable to place order');
-    } finally {
-      setSubmitting(false);
-    }
-  }
 
-  async function updateStatus(orderId: string, status: OrderStatus) {
-    setError(null);
-    try {
-      await apiRequest<Order>(`/orders/${orderId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ status }),
-      });
-      await refreshAll();
-    } catch (updateError) {
-      setError(updateError instanceof Error ? updateError.message : 'Unable to update order');
-    }
-  }
+      if (placed) {
+        // A new key per submission: reusing one would be rejected by the
+        // order-service idempotency guard, which is exactly what it is for.
+        setForm((current) => ({ ...current, idempotencyKey: newIdempotencyKey() }));
+      }
+    },
+    [form, orders, signedInUserId],
+  );
 
-  async function handlePnLFetch() {
-    if (!pnlUserId.trim()) {
-      setPnlError('Enter a user id to fetch P&L');
-      return;
-    }
+  const handleRefresh = useCallback(() => {
+    void orders.refresh();
+    void health.refresh();
+  }, [health, orders]);
 
-    setPnlError(null);
-    setPnlLoading(true);
-    try {
-      const response = await apiRequest<PnLResponse>(`/portfolio/${encodeURIComponent(pnlUserId)}/pnl`);
-      setPnl(response);
-    } catch (pnlFetchError) {
-      setPnlError(pnlFetchError instanceof Error ? pnlFetchError.message : 'Unable to load portfolio P&L');
-    } finally {
-      setPnlLoading(false);
-    }
-  }
+  const handleLogout = useCallback(() => {
+    auth.logout();
+    portfolio.reset();
+  }, [auth, portfolio]);
 
-  if (!token) {
-    return (
-      <div className="app-shell" style={{ justifyContent: 'center', alignItems: 'center' }}>
-        <motion.div className="panel" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} style={{ maxWidth: 400, width: '100%', margin: '0 auto' }}>
-          <div className="brand-mark" style={{ justifyContent: 'center', marginBottom: 24 }}>
-            <div className="brand-orb">
-              <Sparkles size={24} />
-            </div>
-            <div>
-              <div className="brand-name" style={{ fontSize: 24 }}>FundKit</div>
-            </div>
-          </div>
-          <h2 style={{ textAlign: 'center', marginBottom: 8 }}>Authentication Required</h2>
-          <p style={{ textAlign: 'center', marginBottom: 24, color: 'var(--text-secondary)' }}>
-            The API Gateway is secured. You must authenticate to access the order control plane.
-          </p>
-          <button className="submit-button" onClick={() => void handleLogin()} disabled={loginLoading} style={{ width: '100%' }}>
-            {loginLoading ? 'Authenticating...' : 'Login with Dummy Token'}
-          </button>
-          {error && <div className="error-banner" style={{ marginTop: 16 }}>{error}</div>}
-        </motion.div>
-      </div>
-    );
+  if (!isAuthenticated) {
+    return <AuthPanel auth={auth} />;
   }
 
   return (
@@ -298,17 +112,19 @@ export default function App() {
             <Sparkles size={18} />
           </div>
           <div>
-            <div className="brand-name">FundKit</div>
-            <div className="brand-subtitle">Order control plane</div>
+            <div className="brand-name">FundKit Control Center</div>
+            <div className="brand-subtitle">
+              {auth.user ? `Signed in as ${auth.user.full_name}` : `Engineered by ${AUTHOR}`}
+            </div>
           </div>
         </div>
 
         <div className="sidebar-card">
           <div className="sidebar-card-label">Gateway</div>
-          <div className="sidebar-card-value">{apiBase}</div>
-          <div className={`status-pill ${allServicesHealthy ? 'status-pill-up' : 'status-pill-degraded'}`}>
+          <div className="sidebar-card-value">{API_BASE_URL}</div>
+          <div className={`status-pill ${health.allHealthy ? 'status-pill-up' : 'status-pill-degraded'}`}>
             <ShieldCheck size={14} />
-            {allServicesHealthy ? 'All services healthy' : 'Some services degraded'}
+            {health.allHealthy ? 'All services healthy' : 'Some services degraded'}
           </div>
         </div>
 
@@ -321,11 +137,20 @@ export default function App() {
         </nav>
 
         <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <button className="refresh-button" type="button" onClick={() => void refreshAll()}>
+          <button className="refresh-button" type="button" onClick={handleRefresh}>
             <RefreshCw size={16} />
             Refresh stack
           </button>
-          <button className="refresh-button" type="button" onClick={handleLogout} style={{ backgroundColor: 'transparent', color: 'var(--danger-text)', border: '1px solid var(--danger-border)' }}>
+          <button
+            className="refresh-button"
+            type="button"
+            onClick={handleLogout}
+            style={{
+              backgroundColor: 'transparent',
+              color: 'var(--danger-text)',
+              border: '1px solid var(--danger-border)',
+            }}
+          >
             Logout
           </button>
         </div>
@@ -340,23 +165,23 @@ export default function App() {
             </div>
             <h1>Mutual fund orders, backed by real services.</h1>
             <p>
-              Create SIP and lump-sum orders, watch the lifecycle move through PENDING, PROCESSING, and terminal states,
-              and verify the backend services from one dashboard.
+              Create SIP and lump-sum orders, watch the lifecycle move through PENDING, PROCESSING
+              and terminal states, and verify every backend service from one dashboard.
             </p>
           </div>
 
           <div className="hero-card">
             <div className="hero-card-top">
               <span>System status</span>
-              <span className={`system-chip ${allServicesHealthy ? 'system-chip-up' : 'system-chip-degraded'}`}>
-                {allServicesHealthy ? 'Stable' : 'Degraded'}
+              <span className={`system-chip ${health.allHealthy ? 'system-chip-up' : 'system-chip-degraded'}`}>
+                {health.allHealthy ? 'Stable' : 'Degraded'}
               </span>
             </div>
-            <div className="hero-card-metric">{formatCurrency(orderMetrics.totalInvested)}</div>
+            <div className="hero-card-metric">{formatCurrency(orders.metrics.totalInvested)}</div>
             <div className="hero-card-caption">Capital routed through the order service</div>
             <div className="hero-card-row">
-              <span><CheckCircle2 size={14} /> {orderMetrics.executed} executed</span>
-              <span><Clock3 size={14} /> {orderMetrics.pending + orderMetrics.processing} active</span>
+              <span><CheckCircle2 size={14} /> {orders.metrics.executed} executed</span>
+              <span><Clock3 size={14} /> {orders.metrics.pending + orders.metrics.processing} active</span>
             </div>
           </div>
         </section>
@@ -364,22 +189,24 @@ export default function App() {
         <section className="metrics-grid">
           <motion.article className="metric-card" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }}>
             <div className="metric-label">Executed</div>
-            <div className="metric-value">{orderMetrics.executed}</div>
+            <div className="metric-value">{orders.metrics.executed}</div>
             <div className="metric-foot"><CheckCircle2 size={14} /> Successful orders</div>
           </motion.article>
           <motion.article className="metric-card" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }}>
             <div className="metric-label">Active</div>
-            <div className="metric-value">{orderMetrics.pending + orderMetrics.processing}</div>
+            <div className="metric-value">{orders.metrics.pending + orders.metrics.processing}</div>
             <div className="metric-foot"><CircleDashed size={14} /> Pending or processing</div>
           </motion.article>
           <motion.article className="metric-card" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>
             <div className="metric-label">Failed</div>
-            <div className="metric-value">{orderMetrics.failed}</div>
+            <div className="metric-value">{orders.metrics.failed}</div>
             <div className="metric-foot"><ArrowRight size={14} /> Rejected or failed lifecycle</div>
           </motion.article>
           <motion.article className="metric-card" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}>
             <div className="metric-label">Services</div>
-            <div className="metric-value">{services.filter((service) => service.status === 'UP').length}/{services.length}</div>
+            <div className="metric-value">
+              {health.services.filter((service) => service.status === 'UP').length}/{health.services.length}
+            </div>
             <div className="metric-foot"><Layers3 size={14} /> Gateway, order, portfolio, notification</div>
           </motion.article>
         </section>
@@ -394,10 +221,13 @@ export default function App() {
               <Send size={18} />
             </div>
 
-            <form className="order-form" onSubmit={handleSubmit}>
+            <form className="order-form" onSubmit={(event) => void handleSubmit(event)}>
               <label>
-                User ID
-                <input value={form.userId} onChange={(event) => setForm({ ...form, userId: event.target.value })} />
+                Placing as
+                <input
+                  value={auth.user ? `${auth.user.full_name} (@${auth.user.username})` : signedInUserId}
+                  readOnly
+                />
               </label>
               <label>
                 Fund ID
@@ -405,28 +235,39 @@ export default function App() {
               </label>
               <label>
                 Amount
-                <input type="number" min="1" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} />
+                <input
+                  type="number"
+                  min="1"
+                  value={form.amount}
+                  onChange={(event) => setForm({ ...form, amount: event.target.value })}
+                />
               </label>
               <label>
                 Order type
-                <select value={form.type} onChange={(event) => setForm({ ...form, type: event.target.value as OrderType })}>
+                <select
+                  value={form.type}
+                  onChange={(event) => setForm({ ...form, type: event.target.value as OrderType })}
+                >
                   <option value="SIP">SIP</option>
                   <option value="LUMPSUM">LUMPSUM</option>
                 </select>
               </label>
               <label className="full-width">
                 Idempotency key
-                <input value={form.idempotencyKey} onChange={(event) => setForm({ ...form, idempotencyKey: event.target.value })} />
+                <input
+                  value={form.idempotencyKey}
+                  onChange={(event) => setForm({ ...form, idempotencyKey: event.target.value })}
+                />
               </label>
 
-              <button className="submit-button" type="submit" disabled={submitting}>
-                {submitting ? 'Submitting...' : 'Submit order'}
+              <button className="submit-button" type="submit" disabled={orders.submitting}>
+                {orders.submitting ? 'Submitting…' : 'Submit order'}
               </button>
             </form>
 
             <div className="helper-text">
-              The gateway forwards this to order-service, which persists the order, claims Redis idempotency, and publishes
-              the event to Kafka.
+              The gateway forwards this to order-service, which claims the Redis idempotency key,
+              persists the order to Postgres and publishes the event to Kafka.
             </div>
           </motion.section>
 
@@ -440,7 +281,7 @@ export default function App() {
             </div>
 
             <div className="service-list">
-              {services.map((service) => (
+              {health.services.map((service) => (
                 <div key={service.service} className="service-item">
                   <div>
                     <div className="service-name">{service.service}</div>
@@ -448,13 +289,17 @@ export default function App() {
                   </div>
                   <span className={`status-pill ${service.status === 'UP' ? 'status-pill-up' : 'status-pill-down'}`}>
                     {service.status}
+                    {service.latency ? ` · ${service.latency}` : ''}
                   </span>
                 </div>
               ))}
             </div>
 
+            {health.error && <div className="error-banner">{health.error}</div>}
+
             <div className="helper-text">
-              Gateway health is aggregated from order-service, portfolio-service, and notification-service endpoints.
+              The gateway probes every service&apos;s <code>/readyz</code> endpoint concurrently, so
+              this panel reflects dependency health rather than just a live process.
             </div>
           </motion.section>
         </section>
@@ -471,33 +316,40 @@ export default function App() {
           <div className="pnl-controls">
             <label>
               User ID
-              <input value={pnlUserId} onChange={(event) => setPnlUserId(event.target.value)} />
+              <input value={pnlUser} onChange={(event) => setPnlUserId(event.target.value)} />
             </label>
-            <button className="ghost-button" type="button" onClick={() => void handlePnLFetch()} disabled={pnlLoading}>
-              {pnlLoading ? 'Loading...' : 'Fetch P&L'}
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => void portfolio.fetchPnL(pnlUser)}
+              disabled={portfolio.loading}
+            >
+              {portfolio.loading ? 'Loading…' : 'Fetch P&L'}
             </button>
           </div>
 
-          {pnlError && <div className="error-banner">{pnlError}</div>}
+          {portfolio.error && <div className="error-banner">{portfolio.error}</div>}
 
-          {pnl && (
+          {portfolio.pnl && (
             <div className="pnl-grid">
               <div className="pnl-metric">
                 <div className="metric-label">Total value</div>
-                <div className="metric-value">{formatCurrency(pnl.total_value)}</div>
+                <div className="metric-value">{formatCurrency(portfolio.pnl.total_value)}</div>
               </div>
               <div className="pnl-metric">
                 <div className="metric-label">Unrealized gain</div>
-                <div className={`metric-value ${pnl.total_unrealized_gain >= 0 ? 'pnl-positive' : 'pnl-negative'}`}>
-                  {formatCurrency(pnl.total_unrealized_gain)}
+                <div className={`metric-value ${portfolio.pnl.total_unrealized_gain >= 0 ? 'pnl-positive' : 'pnl-negative'}`}>
+                  {formatCurrency(portfolio.pnl.total_unrealized_gain)}
                 </div>
               </div>
               <div className="pnl-holdings">
-                {pnl.holdings.map((holding) => (
+                {portfolio.pnl.holdings.map((holding) => (
                   <div key={holding.fund_id} className="pnl-holding">
                     <div>
                       <div className="fund-name">{holding.fund_name}</div>
-                      <div className="fund-meta">Units {holding.units.toFixed(2)} · NAV {holding.nav.toFixed(2)}</div>
+                      <div className="fund-meta">
+                        Units {holding.units.toFixed(2)} · NAV {holding.nav.toFixed(2)}
+                      </div>
                     </div>
                     <div className="pnl-values">
                       <div>{formatCurrency(holding.current_value)}</div>
@@ -512,7 +364,8 @@ export default function App() {
           )}
 
           <div className="helper-text">
-            The portfolio service caches NAV prices in Redis and recalculates unrealized gains on demand.
+            order-service resolves this over gRPC; portfolio-service serves it from a short-TTL
+            Redis cache in front of the NAV feed.
           </div>
         </motion.section>
 
@@ -522,71 +375,97 @@ export default function App() {
               <div className="panel-kicker">Order book</div>
               <h2>Latest orders</h2>
             </div>
-            <button className="ghost-button" type="button" onClick={() => void refreshAll()}>
+            <button className="ghost-button" type="button" onClick={() => void orders.refresh()}>
               <RefreshCw size={16} />
               Reload
             </button>
           </div>
 
-          <div className="table-shell">
-            <table>
-              <thead>
-                <tr>
-                  <th>Fund</th>
-                  <th>Amount</th>
-                  <th>Type</th>
-                  <th>Status</th>
-                  <th>Created</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orders.map((order) => (
-                  <tr key={order.id}>
-                    <td>
-                      <div className="fund-cell">
-                        <div className="fund-dot" />
-                        <div>
-                          <div className="fund-name">{order.fund_id}</div>
-                          <div className="fund-meta">{order.user_id}</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td>{formatCurrency(order.amount)}</td>
-                    <td>{order.type}</td>
-                    <td>
-                      <span className={`order-badge order-badge-${statusTone(order.status).toLowerCase()}`}>{order.status}</span>
-                    </td>
-                    <td>{formatDate(order.created_at)}</td>
-                    <td>
-                      <div className="action-row">
-                        {order.status === 'PENDING' && (
-                          <button type="button" onClick={() => void updateStatus(order.id, 'PROCESSING')}>Process</button>
-                        )}
-                        {order.status === 'PROCESSING' && (
-                          <>
-                            <button type="button" onClick={() => void updateStatus(order.id, 'EXECUTED')}>Execute</button>
-                            <button type="button" onClick={() => void updateStatus(order.id, 'FAILED')}>Fail</button>
-                          </>
-                        )}
-                        {(order.status === 'EXECUTED' || order.status === 'FAILED') && <span className="action-static">Terminal</span>}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {!loading && orders.length === 0 && (
+          <ErrorBoundary>
+            <div className="table-shell">
+              <table>
+                <thead>
                   <tr>
-                    <td colSpan={6} className="empty-state">
-                      No orders yet. Create the first one above.
-                    </td>
+                    <th>Fund</th>
+                    <th>Amount</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                    <th>Actions</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {orders.orders.map((order) => (
+                    <tr key={order.id}>
+                      <td>
+                        <div className="fund-cell">
+                          <div className="fund-dot" />
+                          <div>
+                            <div className="fund-name">{order.fund_id}</div>
+                            <div className="fund-meta">{order.user_id}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td>{formatCurrency(order.amount)}</td>
+                      <td>{order.type}</td>
+                      <td>
+                        <span className={`order-badge order-badge-${statusTone(order.status)}`}>
+                          {order.status}
+                        </span>
+                      </td>
+                      <td>{formatDate(order.created_at)}</td>
+                      <td>
+                        <div className="action-row">
+                          {order.status === 'PENDING' && (
+                            <button type="button" onClick={() => void orders.updateStatus(order.id, 'PROCESSING')}>
+                              Process
+                            </button>
+                          )}
+                          {order.status === 'PROCESSING' && (
+                            <>
+                              <button type="button" onClick={() => void orders.updateStatus(order.id, 'EXECUTED')}>
+                                Execute
+                              </button>
+                              <button type="button" onClick={() => void orders.updateStatus(order.id, 'FAILED')}>
+                                Fail
+                              </button>
+                            </>
+                          )}
+                          {(order.status === 'EXECUTED' || order.status === 'FAILED') && (
+                            <span className="action-static">Terminal</span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {!orders.loading && orders.orders.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="empty-state">
+                        No orders yet. Create the first one above.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </ErrorBoundary>
         </motion.section>
 
-        {error && <div className="error-banner">{error}</div>}
+        {orders.error && (
+          <div className="error-banner" onClick={orders.clearError} role="alert">
+            {orders.error}
+          </div>
+        )}
+
+        <footer className="app-footer">
+          <span>FundKit Control Center</span>
+          <span className="author-credit">
+            Engineered by{' '}
+            <a href={AUTHOR_URL} target="_blank" rel="noreferrer">
+              {AUTHOR}
+            </a>
+          </span>
+        </footer>
       </main>
     </div>
   );
