@@ -54,7 +54,7 @@ func TestIntegrationPublishedEventIsReadableByAConsumer(t *testing.T) {
 	publisher := NewPublisher(config.KafkaConfig{
 		Brokers:    brokers,
 		OrderTopic: topic,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { _ = publisher.Close() })
 
 	order := domain.Order{

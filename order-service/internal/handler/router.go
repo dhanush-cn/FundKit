@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/dhanush-cn/fundkit/order-service/internal/platform/metrics"
 )
 
 // RouterDeps is explicit constructor injection: every dependency the HTTP layer
@@ -13,18 +15,26 @@ import (
 type RouterDeps struct {
 	Logger         *slog.Logger
 	RequestTimeout time.Duration
+	Metrics        *metrics.HTTP
 	Orders         *OrderHandler
 	Portfolio      *PortfolioHandler
 	Health         *HealthHandler
 }
 
 // NewRouter wires the middleware chain and route table.
+//
+// The metrics middleware is registered outside Recovery on purpose: a panic
+// unwinds through everything below the recovery handler before recover() runs,
+// so an inner observer would record the status code as it stood before the 500
+// was written. Outside it, c.Next() returns with the 500 already set and a
+// panic is counted as the error it is.
 func NewRouter(deps RouterDeps) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 
 	router := gin.New()
 	router.Use(
 		RequestID(),
+		deps.Metrics.Middleware(),
 		Recovery(deps.Logger),
 		RequestLogger(deps.Logger),
 		Timeout(deps.RequestTimeout),

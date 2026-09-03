@@ -20,6 +20,7 @@ import (
 	"github.com/dhanush-cn/fundkit/order-service/internal/handler"
 	"github.com/dhanush-cn/fundkit/order-service/internal/messaging"
 	"github.com/dhanush-cn/fundkit/order-service/internal/platform/logging"
+	"github.com/dhanush-cn/fundkit/order-service/internal/platform/metrics"
 	"github.com/dhanush-cn/fundkit/order-service/internal/portfolio"
 	"github.com/dhanush-cn/fundkit/order-service/internal/relay"
 	"github.com/dhanush-cn/fundkit/order-service/internal/repository"
@@ -41,6 +42,11 @@ func run() error {
 
 	logger := logging.New(cfg.Service.Name, cfg.Service.LogLevel)
 
+	// One registry per process, constructed here and injected downward. Nothing
+	// in FundKit reaches for prometheus.DefaultRegisterer, so what this service
+	// exports is exactly what this function wired up.
+	promRegistry := metrics.New()
+
 	// signal.NotifyContext turns SIGINT/SIGTERM into context cancellation, so
 	// the whole dependency graph shuts down through one mechanism.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -58,7 +64,7 @@ func run() error {
 	}
 	defer closeQuietly(logger, "redis", redisClient.Close)
 
-	publisher := messaging.NewPublisher(cfg.Kafka, logger)
+	publisher := messaging.NewPublisher(cfg.Kafka, promRegistry.Kafka, logger)
 	defer closeQuietly(logger, "kafka", publisher.Close)
 
 	portfolioClient, err := portfolio.New(cfg.Portfolio, logger)
@@ -96,6 +102,7 @@ func run() error {
 	router := handler.NewRouter(handler.RouterDeps{
 		Logger:         logger,
 		RequestTimeout: cfg.Service.RequestTimeout,
+		Metrics:        promRegistry.HTTP,
 		Orders:         handler.NewOrderHandler(orderService),
 		Portfolio:      handler.NewPortfolioHandler(portfolioClient),
 		Health: handler.NewHealthHandler(cfg.Service.Name,
@@ -114,6 +121,22 @@ func run() error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+
+	// The admin listener is a second server on its own port so a scrape never
+	// traverses the request timeout, tracing and access-log chain that exists
+	// for customer traffic, and never appears in the RED metrics it is reading.
+	metricsServer := metrics.NewServer(":"+cfg.Service.MetricsPort, promRegistry)
+	go func() {
+		logger.InfoContext(ctx, "metrics listener started",
+			slog.String("addr", metricsServer.Addr),
+			slog.String("path", "/metrics"),
+		)
+		// Logged, not fatal: losing observability is bad, refusing to accept
+		// orders because of it is worse.
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("metrics listener stopped", slog.String("error", err.Error()))
+		}
+	}()
 
 	serverErr := make(chan error, 1)
 	go func() {
@@ -150,6 +173,12 @@ func run() error {
 
 	stopRelay()
 	outboxRelay.Wait()
+
+	// The admin listener goes last, after the relay's final flush, so a scrape
+	// landing mid-drain still records the publishes that flush produced.
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		logger.Error("metrics listener shutdown failed", slog.String("error", err.Error()))
+	}
 
 	logger.Info("order-service stopped cleanly")
 	return nil

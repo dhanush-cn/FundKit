@@ -21,6 +21,7 @@ type ServiceConfig struct {
 	Name            string
 	GRPCPort        string
 	HTTPPort        string
+	MetricsPort     string // admin listener for /metrics, deliberately not HTTPPort
 	LogLevel        string
 	ShutdownTimeout time.Duration
 	RequestTimeout  time.Duration
@@ -43,6 +44,7 @@ func Load() (Config, error) {
 			Name:            envString("SERVICE_NAME", "portfolio-service", "SERVICE_NAME"),
 			GRPCPort:        envString("GRPC_PORT", "50051", "GRPC_PORT"),
 			HTTPPort:        envString("HTTP_PORT", "8082", "PORT"),
+			MetricsPort:     envString("METRICS_PORT", "9100", ""),
 			LogLevel:        envString("LOG_LEVEL", "info", "LOG_LEVEL"),
 			ShutdownTimeout: envDuration("SHUTDOWN_TIMEOUT", 15*time.Second),
 			RequestTimeout:  envDuration("REQUEST_TIMEOUT", 5*time.Second),

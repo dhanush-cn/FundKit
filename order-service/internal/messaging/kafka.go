@@ -1,10 +1,14 @@
 // Package messaging publishes order lifecycle events onto Kafka.
 //
-// Two decisions worth calling out:
+// Three decisions worth calling out:
 //   - every message is keyed by order id, so all events for one order land on
 //     one partition and are therefore consumed in the order they happened;
 //   - the correlation id travels as a Kafka header rather than inside the
-//     payload, so tracing works even for consumers that never parse the body.
+//     payload, so tracing works even for consumers that never parse the body;
+//   - every write is counted, success or failure, on
+//     kafka_events_published_total. With RequiredAcks=RequireAll a publish
+//     blocks until every in-sync replica has the record, so the failure rate
+//     here is the first thing to move when the broker loses a replica.
 //
 // Engineered by Dhanush C N (github.com/dhanush-cn)
 package messaging
@@ -21,6 +25,7 @@ import (
 
 	"github.com/dhanush-cn/fundkit/order-service/internal/config"
 	"github.com/dhanush-cn/fundkit/order-service/internal/domain"
+	"github.com/dhanush-cn/fundkit/order-service/internal/platform/metrics"
 	"github.com/dhanush-cn/fundkit/order-service/internal/platform/trace"
 )
 
@@ -36,10 +41,16 @@ type OrderEvent = domain.OrderEvent
 
 type Publisher struct {
 	writer *kafka.Writer
-	logger *slog.Logger
+	// recorder is the concrete type rather than an interface on purpose:
+	// *metrics.Kafka tolerates a nil receiver, so a caller with no registry
+	// (the integration tests) passes nil and every call site below stays free
+	// of guard clauses.
+	recorder *metrics.Kafka
+	logger   *slog.Logger
 }
 
-func NewPublisher(cfg config.KafkaConfig, logger *slog.Logger) *Publisher {
+// NewPublisher builds the writer. Pass nil for recorder to run uninstrumented.
+func NewPublisher(cfg config.KafkaConfig, recorder *metrics.Kafka, logger *slog.Logger) *Publisher {
 	writer := &kafka.Writer{
 		Addr:         kafka.TCP(cfg.Brokers...),
 		Topic:        cfg.OrderTopic,
@@ -53,7 +64,17 @@ func NewPublisher(cfg config.KafkaConfig, logger *slog.Logger) *Publisher {
 		slog.Any("brokers", cfg.Brokers),
 		slog.String("topic", cfg.OrderTopic),
 	)
-	return &Publisher{writer: writer, logger: logger}
+	return &Publisher{writer: writer, recorder: recorder, logger: logger}
+}
+
+// topic reports the topic every message from this publisher lands on. It is
+// read from the writer rather than stored twice so the metric label can never
+// drift from the destination.
+func (p *Publisher) topic() string {
+	if p == nil || p.writer == nil {
+		return "unknown"
+	}
+	return p.writer.Topic
 }
 
 func (p *Publisher) Close() error {
@@ -93,7 +114,10 @@ func (p *Publisher) PublishOrderStatusChanged(ctx context.Context, order domain.
 		},
 	}
 
-	if err := p.writer.WriteMessages(ctx, message); err != nil {
+	started := time.Now()
+	err = p.writer.WriteMessages(ctx, message)
+	p.recorder.ObservePublish(p.topic(), started, err)
+	if err != nil {
 		return fmt.Errorf("write order event: %w", err)
 	}
 
@@ -132,9 +156,12 @@ func (p *Publisher) PublishOutbox(ctx context.Context, msg domain.OutboxMessage)
 		},
 	}
 
+	started := time.Now()
 	if err := p.writer.WriteMessages(ctx, message); err != nil {
+		p.recorder.ObservePublish(p.topic(), started, err)
 		return fmt.Errorf("write outbox message %d: %w", msg.ID, err)
 	}
+	p.recorder.ObservePublish(p.topic(), started, nil)
 
 	p.logger.DebugContext(ctx, "outbox message published",
 		slog.Int64("outbox_id", msg.ID),

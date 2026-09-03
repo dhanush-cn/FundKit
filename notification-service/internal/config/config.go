@@ -19,6 +19,7 @@ type Config struct {
 type ServiceConfig struct {
 	Name            string
 	HTTPPort        string
+	MetricsPort     string // admin listener for /metrics, deliberately not HTTPPort
 	LogLevel        string
 	ShutdownTimeout time.Duration
 }
@@ -39,6 +40,7 @@ func Load() (Config, error) {
 		Service: ServiceConfig{
 			Name:            envString("SERVICE_NAME", "notification-service", "SERVICE_NAME"),
 			HTTPPort:        envString("HTTP_PORT", "8083", "PORT"),
+			MetricsPort:     envString("METRICS_PORT", "9100", ""),
 			LogLevel:        envString("LOG_LEVEL", "info", "LOG_LEVEL"),
 			ShutdownTimeout: envDuration("SHUTDOWN_TIMEOUT", 15*time.Second),
 		},
