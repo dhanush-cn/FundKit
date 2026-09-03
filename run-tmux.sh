@@ -1,4 +1,6 @@
 #!/bin/bash
+# FundKit local runner
+# Engineered by Dhanush C N (github.com/dhanush-cn)
 
 SESSION="fundkit"
 

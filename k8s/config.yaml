@@ -1,0 +1,38 @@
+# Engineered by Dhanush C N (github.com/dhanush-cn)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fundkit-config
+  labels:
+    app.kubernetes.io/part-of: fundkit
+data:
+  FUNDKIT_LOG_LEVEL: "info"
+  FUNDKIT_SHUTDOWN_TIMEOUT: "15s"
+  FUNDKIT_REDIS_URL: "redis:6379"
+  FUNDKIT_KAFKA_BROKERS: "kafka:9092"
+  FUNDKIT_KAFKA_ORDER_TOPIC: "order_events"
+  FUNDKIT_KAFKA_CONSUMER_GROUP: "fundkit-notification-workers"
+  FUNDKIT_ORDER_SERVICE_URL: "http://order-service:8081"
+  FUNDKIT_ORDER_SERVICE_HEALTH_URL: "http://order-service:8081/readyz"
+  FUNDKIT_PORTFOLIO_SERVICE_HEALTH_URL: "http://portfolio-service:8082/readyz"
+  FUNDKIT_NOTIFICATION_SERVICE_HEALTH_URL: "http://notification-service:8083/readyz"
+  FUNDKIT_PORTFOLIO_GRPC_URL: "portfolio-service:50051"
+  FUNDKIT_NAV_CACHE_TTL: "30s"
+  FUNDKIT_JWT_TTL: "24h"
+  # bcrypt work factor for the gateway's password hashing. Raise it as the
+  # cluster's CPUs get faster; every increment doubles the cost of a guess.
+  FUNDKIT_BCRYPT_COST: "12"
+---
+# Placeholder only. In a real cluster these come from an external secret store
+# (Sealed Secrets, External Secrets Operator, or the cloud provider's manager)
+# and never from a file in the repository.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fundkit-secrets
+  labels:
+    app.kubernetes.io/part-of: fundkit
+type: Opaque
+stringData:
+  FUNDKIT_JWT_SECRET: "replace-me-with-a-32-byte-random-string"
+  FUNDKIT_DB_URL: "postgres://fundkit:password@postgres:5432/fundkit_db?sslmode=disable"

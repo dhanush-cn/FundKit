@@ -1,11 +1,13 @@
 # Environment variables
 .env
-.env.example
+.env.*
+!.env.example
 
 
 # Node dependencies
 node_modules/
 frontend/dist/
+frontend/coverage/
 frontend/.env.local
 
 # IDEs
@@ -20,3 +22,16 @@ frontend/.env.local
 # OS files
 .DS_Store
 Thumbs.db
+
+# Go build artifacts
+*.exe
+*.test
+*.out
+bin/
+coverage.out
+
+# Editor and tooling backups
+*.bak
+
+# Personal interview notes - never commit
+INTERVIEW_PREP.md

@@ -1,5 +1,9 @@
+# FundKit local stack
+# Engineered by Dhanush C N (github.com/dhanush-cn)
+name: fundkit
+
 services:
-  # Infrastructure
+  # ---------------------------------------------------------------- infrastructure
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
     restart: unless-stopped
@@ -10,10 +14,13 @@ services:
   kafka:
     image: confluentinc/cp-kafka:7.6.1
     restart: unless-stopped
+    # Kafka retries its Zookeeper connection on its own, so plain start-ordering
+    # is enough here and avoids depending on a healthcheck binary that the
+    # Zookeeper image may not ship.
     depends_on:
       - zookeeper
     ports:
-      - 29092:29092
+      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -21,6 +28,15 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 20s
+      retries: 15
+      start_period: 45s
 
   postgres:
     image: postgres:15
@@ -30,7 +46,11 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: fundkit_db
     ports:
-      - "5432:5432"
+      # Host port shifted to avoid colliding with a locally installed Postgres.
+      # Inside the Docker network this is still plain postgres:5432.
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -41,78 +61,112 @@ services:
     image: redis:7
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      # Host port shifted to avoid colliding with a locally running Redis.
+      # Inside the Docker network this is still plain redis:6379.
+      - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  # Microservices
+  # ---------------------------------------------------------------- microservices
   api-gateway:
     build: ./api-gateway
     restart: unless-stopped
     ports:
       - "8080:8080"
     depends_on:
-      - kafka
+      order-service:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     environment:
-      - PORT=8080
-      - KAFKA_BROKERS=kafka:9092
-      - JWT_SECRET=dev-secret
-      - ORDER_SERVICE_URL=http://order-service:8081
-      - ORDER_SERVICE_HEALTH_URL=http://order-service:8081/health
-      - PORTFOLIO_SERVICE_HEALTH_URL=http://portfolio-service:8082/health
-      - NOTIFICATION_SERVICE_HEALTH_URL=http://notification-service:8083/health
+      FUNDKIT_SERVICE_NAME: api-gateway
+      FUNDKIT_HTTP_PORT: "8080"
+      FUNDKIT_LOG_LEVEL: info
+      FUNDKIT_JWT_SECRET: fundkit-local-dev-secret-change-me
+      FUNDKIT_JWT_TTL: 24h
+      # The gateway owns the identity store and shares the cluster's Postgres.
+      FUNDKIT_DB_URL: postgres://fundkit:password@postgres:5432/fundkit_db?sslmode=disable
+      FUNDKIT_BCRYPT_COST: "10"
+      FUNDKIT_ORDER_SERVICE_URL: http://order-service:8081
+      FUNDKIT_ORDER_SERVICE_HEALTH_URL: http://order-service:8081/readyz
+      FUNDKIT_PORTFOLIO_SERVICE_HEALTH_URL: http://portfolio-service:8082/readyz
+      FUNDKIT_NOTIFICATION_SERVICE_HEALTH_URL: http://notification-service:8083/readyz
+      FUNDKIT_CORS_ALLOWED_ORIGINS: http://localhost:5173
+      FUNDKIT_RATE_LIMIT_RPS: "5"
+      FUNDKIT_RATE_LIMIT_BURST: "10"
 
   order-service:
     build: ./order-service
     restart: unless-stopped
+    ports:
+      - "8081:8081"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
       kafka:
-        condition: service_started
+        condition: service_healthy
     environment:
-      - KAFKA_BROKERS=kafka:9092
-      - DB_URL=postgres://fundkit:password@postgres:5432/fundkit_db?sslmode=disable
-      - REDIS_URL=redis:6379
-      - PORTFOLIO_GRPC_URL=portfolio-service:50051
+      FUNDKIT_SERVICE_NAME: order-service
+      FUNDKIT_HTTP_PORT: "8081"
+      FUNDKIT_LOG_LEVEL: info
+      FUNDKIT_DB_URL: postgres://fundkit:password@postgres:5432/fundkit_db?sslmode=disable
+      FUNDKIT_REDIS_URL: redis:6379
+      FUNDKIT_KAFKA_BROKERS: kafka:9092
+      FUNDKIT_KAFKA_ORDER_TOPIC: order_events
+      FUNDKIT_IDEMPOTENCY_TTL: 24h
+      FUNDKIT_PORTFOLIO_GRPC_URL: portfolio-service:50051
 
   portfolio-service:
     build: ./portfolio-service
     restart: unless-stopped
+    ports:
+      - "8082:8082"
+      - "50051:50051"
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     environment:
-      - DB_URL=postgres://fundkit:password@postgres:5432/fundkit_db?sslmode=disable
-      - REDIS_URL=redis:6379
+      FUNDKIT_SERVICE_NAME: portfolio-service
+      FUNDKIT_GRPC_PORT: "50051"
+      FUNDKIT_HTTP_PORT: "8082"
+      FUNDKIT_LOG_LEVEL: info
+      FUNDKIT_REDIS_URL: redis:6379
+      FUNDKIT_NAV_CACHE_TTL: 30s
 
   notification-service:
     build: ./notification-service
     restart: unless-stopped
+    ports:
+      - "8083:8083"
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     environment:
-      - PORT=8083
-      - KAFKA_BROKERS=kafka:9092
+      FUNDKIT_SERVICE_NAME: notification-service
+      FUNDKIT_HTTP_PORT: "8083"
+      FUNDKIT_LOG_LEVEL: info
+      FUNDKIT_KAFKA_BROKERS: kafka:9092
+      FUNDKIT_KAFKA_ORDER_TOPIC: order_events
+      FUNDKIT_KAFKA_CONSUMER_GROUP: fundkit-notification-workers
 
-  # UI
-  
+  # ---------------------------------------------------------------- ui
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:8080
     restart: unless-stopped
     ports:
       - "5173:80"
     depends_on:
       - api-gateway
 
-  # Monitoring
+  # ---------------------------------------------------------------- monitoring
   prometheus:
     image: prom/prometheus
     restart: unless-stopped
@@ -124,3 +178,10 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres-data:

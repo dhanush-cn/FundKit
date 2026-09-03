@@ -2,59 +2,49 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: api-gateway
+  name: portfolio-service
   labels:
-    app: api-gateway
+    app: portfolio-service
     app.kubernetes.io/part-of: fundkit
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: api-gateway
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+      app: portfolio-service
   template:
     metadata:
       labels:
-        app: api-gateway
+        app: portfolio-service
     spec:
-      # Longer than the service's own shutdown timeout, so the pod is never
-      # SIGKILLed while it is still draining connections.
       terminationGracePeriodSeconds: 30
       containers:
-        - name: api-gateway
-          image: fundkit/api-gateway:latest
+        - name: portfolio-service
+          image: fundkit/portfolio-service:latest
           ports:
+            - name: grpc
+              containerPort: 50051
             - name: http
-              containerPort: 8080
+              containerPort: 8082
           envFrom:
             - configMapRef:
                 name: fundkit-config
-            - secretRef:
-                name: fundkit-secrets
           env:
             - name: FUNDKIT_HTTP_PORT
-              value: "8080"
-          # Liveness restarts a wedged process; readiness only removes the pod
-          # from the Service. Conflating the two turns a slow dependency into a
-          # restart loop.
+              value: "8082"
+            - name: FUNDKIT_GRPC_PORT
+              value: "50051"
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
-            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /readyz
               port: http
             initialDelaySeconds: 3
             periodSeconds: 5
-            failureThreshold: 3
           resources:
             requests:
               cpu: 50m
@@ -71,15 +61,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: api-gateway
-  labels:
-    app: api-gateway
+  name: portfolio-service
 spec:
   selector:
-    app: api-gateway
+    app: portfolio-service
   ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
     - name: http
-      protocol: TCP
-      port: 80
+      port: 8082
       targetPort: http
-  type: LoadBalancer

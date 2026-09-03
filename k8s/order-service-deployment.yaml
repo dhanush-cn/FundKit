@@ -2,34 +2,27 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: api-gateway
+  name: order-service
   labels:
-    app: api-gateway
+    app: order-service
     app.kubernetes.io/part-of: fundkit
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: api-gateway
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+      app: order-service
   template:
     metadata:
       labels:
-        app: api-gateway
+        app: order-service
     spec:
-      # Longer than the service's own shutdown timeout, so the pod is never
-      # SIGKILLed while it is still draining connections.
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: 45
       containers:
-        - name: api-gateway
-          image: fundkit/api-gateway:latest
+        - name: order-service
+          image: fundkit/order-service:latest
           ports:
             - name: http
-              containerPort: 8080
+              containerPort: 8081
           envFrom:
             - configMapRef:
                 name: fundkit-config
@@ -37,31 +30,28 @@ spec:
                 name: fundkit-secrets
           env:
             - name: FUNDKIT_HTTP_PORT
-              value: "8080"
-          # Liveness restarts a wedged process; readiness only removes the pod
-          # from the Service. Conflating the two turns a slow dependency into a
-          # restart loop.
+              value: "8081"
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 5
+            initialDelaySeconds: 10
             periodSeconds: 10
-            failureThreshold: 3
+          # /readyz checks Postgres and Redis, so a pod that loses its database
+          # is pulled out of rotation instead of returning 500s.
           readinessProbe:
             httpGet:
               path: /readyz
               port: http
-            initialDelaySeconds: 3
+            initialDelaySeconds: 5
             periodSeconds: 5
-            failureThreshold: 3
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
+              cpu: 100m
+              memory: 128Mi
             limits:
-              cpu: 500m
-              memory: 256Mi
+              cpu: 1000m
+              memory: 512Mi
           securityContext:
             runAsNonRoot: true
             runAsUser: 10001
@@ -71,15 +61,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: api-gateway
-  labels:
-    app: api-gateway
+  name: order-service
 spec:
   selector:
-    app: api-gateway
+    app: order-service
   ports:
     - name: http
-      protocol: TCP
-      port: 80
+      port: 8081
       targetPort: http
-  type: LoadBalancer
