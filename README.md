@@ -146,6 +146,97 @@ no call site has to remember to attach it:
 
 ---
 
+## Metrics, dashboards and alerts
+
+Tracing answers "what happened to *this* request". Metrics answer "is the system healthy right
+now" — and they are the half you can alert on, because a metric is a number over time rather than a
+line of text you have to go looking for.
+
+Every service exposes Prometheus metrics on a **dedicated admin listener** (`:9100`, `/metrics`),
+separate from the port that serves customer traffic. That separation is deliberate:
+
+- a scrape must not traverse JWT auth, CORS or the per-client rate limiter, and adding exceptions
+  to a security chain to let a scraper through is how those chains rot;
+- `/metrics` stays off the internet, because the admin port is never published through the ingress;
+- a slow scrape cannot consume a connection slot on the public server, so observability can never
+  be the thing that takes the API down.
+
+### What is instrumented
+
+| Metric | Type | Labels | Where |
+|---|---|---|---|
+| `http_requests_total` | counter | `method`, `path`, `status_code` | api-gateway, order-service |
+| `http_request_duration_seconds` | histogram | `method`, `path` | api-gateway, order-service |
+| `http_requests_in_flight` | gauge | — | api-gateway, order-service |
+| `grpc_server_requests_total` | counter | `grpc_service`, `grpc_method`, `grpc_code` | portfolio-service |
+| `grpc_server_request_duration_seconds` | histogram | `grpc_service`, `grpc_method` | portfolio-service |
+| `kafka_events_published_total` | counter | `topic`, `status` | order-service |
+| `kafka_events_consumed_total` | counter | `topic`, `status` | notification-service |
+| `kafka_event_processing_duration_seconds` | histogram | `topic` | notification-service |
+| `kafka_consumer_lag` | gauge | `topic`, `group` | notification-service |
+
+Plus the standard Go runtime and process collectors on every service: goroutines, heap, GC pause,
+open file descriptors, CPU seconds.
+
+### Four decisions worth defending in an interview
+
+**The route label is the template, never the raw path.** `/orders/:id`, not
+`/orders/9f3c1e5a…`. A raw path turns every order id into its own time series, and unbounded label
+cardinality is the single most common way a Prometheus install falls over. Unmatched requests
+collapse into one `unmatched` bucket so a 404 scan cannot mint a series per URL either.
+
+**Latency is a histogram, not a summary.** Summaries compute quantiles inside each process and
+cannot be aggregated, so a p99 across four replicas would be arithmetically meaningless. Histograms
+ship buckets and let `histogram_quantile()` do the maths across the whole fleet at query time. All
+four services share one bucket layout, which is what lets a single panel compare an HTTP hop against
+a gRPC hop.
+
+**The metrics middleware sits outside the recovery handler.** A panic unwinds through every
+middleware registered *below* the recovery handler before `recover()` runs, so an inner observer
+would record the status code as it stood before the 500 was written — and panics would quietly
+count as successes. Placed outside, `c.Next()` returns with the 500 already set. The same argument
+puts the gRPC interceptor outside the server-side timeout, so an RPC killed by its own deadline is
+counted with code `DeadlineExceeded` rather than not counted at all.
+
+**Consumer lag is a collector, not a polled gauge.** The value is read from the kafka-go reader
+during the scrape itself. A polled gauge is stale by up to one poll interval and keeps cheerfully
+reporting its last value after the reader dies; a collector that reads on demand simply stops
+reporting, which is the honest answer.
+
+And the reason lag is instrumented at all: throughput hides backlog. A worker handling 500 events/s
+looks perfectly healthy right until you notice the producer is doing 700/s and the backlog is an
+hour deep.
+
+### Running it
+
+```bash
+docker compose up -d --build
+make metrics      # curl every service's /metrics
+make monitoring   # print the Prometheus and Grafana URLs
+```
+
+| | URL |
+|---|---|
+| Grafana dashboard | http://localhost:3000/d/fundkit-overview *(admin / admin)* |
+| Prometheus targets | http://localhost:9090/targets |
+| Alert rules | http://localhost:9090/alerts |
+| Raw metrics | `:9101` gateway · `:9102` order · `:9103` portfolio · `:9104` notification |
+
+The Grafana datasource **and** dashboard are provisioned from files in
+[`monitoring/`](monitoring/), so a fresh `docker compose up` produces a working dashboard with no
+clicking. The dashboard JSON lives in git and is reviewed like code rather than existing only in
+somebody's browser.
+
+Alert rules in [`monitoring/prometheus/rules/`](monitoring/prometheus/rules/) alert on symptoms a
+customer could describe — error ratio, p99 regression, publish failures, growing consumer lag,
+poison messages — never on causes like CPU. Every rule carries a `for:` clause so one bad scrape or
+a deploy blip cannot page anyone.
+
+Query recipes, including how to project backlog drain time, are in
+[`monitoring/PROMQL.md`](monitoring/PROMQL.md).
+
+---
+
 ## Project layout
 
 Each service follows the same layered Go layout, so moving between them requires no re-orientation:
@@ -160,7 +251,9 @@ Each service follows the same layered Go layout, so moving between them requires
 │   ├── repository/             # persistence adapters (Postgres, in-memory stores)
 │   ├── cache/  messaging/      # Redis and Kafka adapters
 │   ├── domain/                 # entities and rules; no framework imports
-│   └── platform/logging|trace/ # structured logging and correlation-id plumbing
+│   └── platform/                # cross-cutting concerns
+│       ├── logging|trace/       # structured logging and correlation-id plumbing
+│       └── metrics/             # Prometheus registry, middleware, admin listener
 └── pb/                         # generated protobuf stubs
 ```
 
@@ -175,6 +268,7 @@ business rules can be tested with fakes and never import gorm, redis or kafka.
 ├── notification-service/   Kafka consumer group, alert fan-out
 ├── frontend/               React + TypeScript dashboard
 ├── proto/fundkit.proto     internal service contract
+├── monitoring/             Prometheus scrape config, alert rules, provisioned Grafana dashboard
 ├── k8s/                    deployments with liveness/readiness probes and resource limits
 └── docker-compose.yml      full local stack
 ```
@@ -191,6 +285,8 @@ business rules can be tested with fakes and never import gorm, redis or kafka.
   restart loop.
 - **Structured JSON logging** via `log/slog` with a context-aware handler — no `log.Println`
   anywhere in the codebase.
+- **Prometheus metrics on a separate admin port**, with route-template labels, shared histogram
+  buckets across services, and alert rules that fire on symptoms rather than causes.
 - **Bounded everything.** Server read/write/idle timeouts, per-request context deadlines, gRPC
   call deadlines, connection pool limits, and a rate-limiter janitor so the per-IP map cannot grow
   without bound.
@@ -210,6 +306,7 @@ read as a fallback so a running deployment can migrate without a flag day. See
 | Variable | Service | Default |
 |---|---|---|
 | `FUNDKIT_HTTP_PORT` | all | 8080 / 8081 / 8082 / 8083 |
+| `FUNDKIT_METRICS_PORT` | all | `9100` |
 | `FUNDKIT_LOG_LEVEL` | all | `info` |
 | `FUNDKIT_SHUTDOWN_TIMEOUT` | all | `15s` |
 | `FUNDKIT_JWT_SECRET` | api-gateway | **required**, ≥16 chars |
@@ -246,7 +343,9 @@ Then open **http://localhost:5173**.
 | Gateway liveness / readiness | `/healthz`, `/readyz` |
 | Aggregated stack health | http://localhost:8080/services/health |
 | Portfolio gRPC | `localhost:50051` |
-| Prometheus / Grafana | http://localhost:9090 · http://localhost:3000 |
+| Service metrics | `:9101` · `:9102` · `:9103` · `:9104` (`/metrics`) |
+| Prometheus | http://localhost:9090/targets |
+| Grafana dashboard | http://localhost:3000/d/fundkit-overview |
 
 ### Running a single service locally
 

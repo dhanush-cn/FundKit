@@ -1,0 +1,24 @@
+# Grafana datasource provisioning
+# Engineered by Dhanush C N (github.com/dhanush-cn)
+#
+# Provisioned rather than clicked in, so a fresh `docker compose up` produces a
+# working dashboard with no manual setup. Grafana reads this at boot.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: fundkit-prometheus
+    access: proxy
+    # Service name on the compose network, not localhost: Grafana runs in its
+    # own container and localhost there is Grafana itself.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Must match the scrape_interval in prometheus.yml. Grafana uses it to
+      # compute $__rate_interval, and a mismatch produces rate() windows too
+      # narrow to contain enough samples.
+      timeInterval: 15s
+      httpMethod: POST

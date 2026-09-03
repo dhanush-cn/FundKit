@@ -24,6 +24,7 @@ import (
 	"github.com/dhanush-cn/fundkit/portfolio-service/internal/config"
 	"github.com/dhanush-cn/fundkit/portfolio-service/internal/handler"
 	"github.com/dhanush-cn/fundkit/portfolio-service/internal/platform/logging"
+	"github.com/dhanush-cn/fundkit/portfolio-service/internal/platform/metrics"
 	"github.com/dhanush-cn/fundkit/portfolio-service/internal/repository"
 	"github.com/dhanush-cn/fundkit/portfolio-service/internal/service"
 	"github.com/dhanush-cn/fundkit/portfolio-service/pb"
@@ -43,6 +44,11 @@ func run() error {
 	}
 
 	logger := logging.New(cfg.Service.Name, cfg.Service.LogLevel)
+
+	// One registry per process, constructed here and injected downward. Nothing
+	// in FundKit reaches for prometheus.DefaultRegisterer, so what this service
+	// exports is exactly what this function wired up.
+	promRegistry := metrics.New()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -64,9 +70,14 @@ func run() error {
 		logger,
 	)
 
+	// Interceptor order is the same argument as the HTTP middleware order in
+	// the other services: the recorder sits outside the timeout, so an RPC the
+	// server kills on its own deadline is still counted — with code
+	// DeadlineExceeded, which is the distinction on-call actually needs.
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
 			handler.UnaryRequestID(),
+			promRegistry.GRPC.UnaryInterceptor(),
 			handler.UnaryLogger(logger),
 			handler.UnaryTimeout(cfg.Service.RequestTimeout),
 		),
@@ -95,7 +106,24 @@ func run() error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	// portfolio-service already runs an HTTP mux for the kubelet probes, but
+	// metrics get their own listener anyway: a slow scrape must never be able
+	// to delay a readiness probe and get the pod cycled out of rotation.
+	metricsServer := metrics.NewServer(":"+cfg.Service.MetricsPort, promRegistry)
+
 	serverErr := make(chan error, 2)
+
+	go func() {
+		logger.InfoContext(ctx, "metrics listener started",
+			slog.String("addr", metricsServer.Addr),
+			slog.String("path", "/metrics"),
+		)
+		// Logged, not fatal. Losing observability must not take the valuation
+		// API down with it.
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("metrics listener stopped", slog.String("error", err.Error()))
+		}
+	}()
 
 	go func() {
 		logger.InfoContext(ctx, "grpc server listening", slog.String("addr", listener.Addr().String()))
@@ -144,5 +172,16 @@ func run() error {
 		grpcServer.Stop()
 		logger.Warn("grpc graceful stop timed out; forced shutdown")
 	}
+
+	// The admin listener goes last so a scrape landing mid-drain still sees the
+	// in-flight gauge fall to zero rather than a refused connection. It is shut
+	// down on a fresh context because shutdownCtx may already have expired in
+	// the branch above.
+	metricsCtx, cancelMetrics := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelMetrics()
+	if err := metricsServer.Shutdown(metricsCtx); err != nil {
+		logger.Error("metrics listener shutdown failed", slog.String("error", err.Error()))
+	}
+
 	return nil
 }

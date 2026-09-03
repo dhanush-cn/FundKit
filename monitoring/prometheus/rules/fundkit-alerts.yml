@@ -1,0 +1,97 @@
+# FundKit alerting rules
+# Engineered by Dhanush C N (github.com/dhanush-cn)
+#
+# Every rule here alerts on a symptom a customer could describe, not on a cause.
+# "CPU is high" is not an alert; "one request in twenty is failing" is. The
+# `for:` clauses exist so a single bad scrape or a deploy blip cannot page
+# anyone — an alert has to stay true for several evaluation cycles.
+
+groups:
+  - name: fundkit-availability
+    interval: 15s
+    rules:
+      - alert: FundKitServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} is not being scraped"
+          description: >-
+            Prometheus has failed to scrape {{ $labels.instance }} for a minute.
+            Either the process is gone or its admin listener on :9100 is not
+            answering.
+
+      - alert: FundKitHighErrorRate
+        # Ratio of 5xx to all traffic, per service. Expressed as a ratio rather
+        # than a raw count so a quiet service and a busy one alert at the same
+        # sensitivity.
+        expr: |
+          sum by (job) (rate(http_requests_total{status_code=~"5.."}[5m]))
+            /
+          sum by (job) (rate(http_requests_total[5m]))
+            > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} is failing {{ $value | humanizePercentage }} of requests"
+          description: "Server-side error ratio has been above 5% for five minutes."
+
+      - alert: FundKitLatencyRegression
+        # p99 from the shared histogram buckets. by (le, job) is mandatory:
+        # histogram_quantile needs the le dimension intact after aggregation.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le, job) (rate(http_request_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} p99 latency is above one second"
+          description: "p99 has exceeded 1s for ten minutes. Check http_requests_in_flight for saturation."
+
+  - name: fundkit-eventing
+    interval: 15s
+    rules:
+      - alert: FundKitOutboxPublishFailures
+        # The outbox makes an order durable before its event is published, so a
+        # publish failure is silent from the customer's side until the backlog
+        # is old enough to matter. This is the alert that makes it loud.
+        expr: |
+          sum by (topic) (rate(kafka_events_published_total{status="error"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "order-service cannot publish to {{ $labels.topic }}"
+          description: >-
+            Writes to Kafka have been failing for five minutes. Orders are still
+            being accepted and committed; their events are queuing in the outbox
+            table and will replay once the broker recovers.
+
+      - alert: FundKitConsumerLagGrowing
+        expr: kafka_consumer_lag > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.group }} is {{ $value }} messages behind on {{ $labels.topic }}"
+          description: >-
+            The consumer group is not keeping up. Compare the publish rate
+            against the consume rate: if publishing is flat, the consumer has
+            slowed down; if publishing has spiked, it may just need replicas.
+
+      - alert: FundKitPoisonMessages
+        # Dropped messages are committed and gone. One is a bad payload; a
+        # steady rate is a producer that has changed its schema.
+        expr: |
+          sum by (topic) (rate(kafka_events_consumed_total{status="dropped"}[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unparseable events are being discarded from {{ $labels.topic }}"
+          description: "notification-service is committing and dropping messages it cannot decode."

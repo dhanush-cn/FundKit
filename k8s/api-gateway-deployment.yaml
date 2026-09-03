@@ -18,6 +18,13 @@ spec:
       maxSurge: 1
   template:
     metadata:
+      annotations:
+        # Pod discovery: a prometheus.io/scrape relabel rule turns these three
+        # lines into a scrape target, so a new replica is monitored the moment
+        # it schedules and nothing has to be added to a static config.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: "/metrics"
       labels:
         app: api-gateway
     spec:
@@ -30,6 +37,8 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            - name: metrics
+              containerPort: 9100
           envFrom:
             - configMapRef:
                 name: fundkit-config
@@ -38,6 +47,8 @@ spec:
           env:
             - name: FUNDKIT_HTTP_PORT
               value: "8080"
+            - name: FUNDKIT_METRICS_PORT
+              value: "9100"
           # Liveness restarts a wedged process; readiness only removes the pod
           # from the Service. Conflating the two turns a slow dependency into a
           # restart loop.

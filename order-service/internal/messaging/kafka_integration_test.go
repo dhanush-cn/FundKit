@@ -18,7 +18,9 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,14 +49,65 @@ func testBrokers(t *testing.T) []string {
 	return brokers
 }
 
+// createTopic provisions the fixture explicitly instead of leaning on the
+// broker's auto-creation.
+//
+// The compose stack sets KAFKA_AUTO_CREATE_TOPICS_ENABLE=true, which is why
+// relying on it looks reasonable — but kafka-go's Writer sends its metadata
+// requests with AllowAutoTopicCreation unset, so the broker never receives a
+// request that would trigger creation. Every publish then fails with
+// UNKNOWN_TOPIC_OR_PARTITION until the retry budget runs out, which is a
+// twenty-second wait to arrive at a misleading error.
+//
+// Creating it here is better than flipping AllowAutoTopicCreation on the
+// production Writer, which would let a typo in FUNDKIT_KAFKA_ORDER_TOPIC
+// silently create a topic nobody consumes. It also puts the partition count
+// under the test's control, and this test's ordering claim depends on it.
+func createTopic(t *testing.T, brokers []string, topic string) {
+	t.Helper()
+
+	conn, err := kafka.Dial("tcp", brokers[0])
+	if err != nil {
+		t.Fatalf("dial broker: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Topic administration has to go to the cluster controller, which on a
+	// single-broker stack is this same broker — but asking is what makes the
+	// test work against a real multi-broker cluster too.
+	controller, err := conn.Controller()
+	if err != nil {
+		t.Fatalf("locate controller: %v", err)
+	}
+
+	controllerConn, err := kafka.Dial("tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
+	if err != nil {
+		t.Fatalf("dial controller: %v", err)
+	}
+	defer func() { _ = controllerConn.Close() }()
+
+	if err := controllerConn.CreateTopics(kafka.TopicConfig{
+		Topic:             topic,
+		NumPartitions:     1,
+		ReplicationFactor: 1,
+	}); err != nil {
+		t.Fatalf("create topic %s: %v", topic, err)
+	}
+
+	// Each run mints a timestamped topic, so without this the broker
+	// accumulates one dead topic per CI run forever.
+	t.Cleanup(func() { _ = controllerConn.DeleteTopics(topic) })
+}
+
 func TestIntegrationPublishedEventIsReadableByAConsumer(t *testing.T) {
 	brokers := testBrokers(t)
 	topic := "order_events_it_" + time.Now().UTC().Format("150405.000000000")
+	createTopic(t, brokers, topic)
 
 	publisher := NewPublisher(config.KafkaConfig{
 		Brokers:    brokers,
 		OrderTopic: topic,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { _ = publisher.Close() })
 
 	order := domain.Order{
@@ -72,14 +125,15 @@ func TestIntegrationPublishedEventIsReadableByAConsumer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(trace.WithRequestID(context.Background(), "req-integration-1"), 60*time.Second)
 	defer cancel()
 
-	// Auto-topic-creation can need a moment on a cold broker, so the first
-	// write is retried rather than failing the suite on a start-up race.
+	// The topic exists by now, but the writer still has to see it: metadata
+	// propagates asynchronously and kafka-go caches what it last fetched. This
+	// is a short retry for that race, not a substitute for the topic existing.
 	var publishErr error
 	for attempt := 0; attempt < 10; attempt++ {
 		if publishErr = publisher.PublishOrderStatusChanged(ctx, order); publishErr == nil {
 			break
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(time.Second)
 	}
 	if publishErr != nil {
 		t.Fatalf("publish: %v", publishErr)
