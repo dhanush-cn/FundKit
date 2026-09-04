@@ -103,3 +103,149 @@ func TestRoundNAV(t *testing.T) {
 		t.Fatalf("RoundNAV = %v, want 125.46", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Position arithmetic.
+// ---------------------------------------------------------------------------
+
+func TestAvgCostIsDerivedNotAccumulated(t *testing.T) {
+	// 36 monthly SIP instalments of ₹5,000.00, each buying units at a slightly
+	// different NAV. The point is not the final number but that it is computed
+	// from two exact running totals: a stored average would carry 36 roundings
+	// by the time the customer sees it.
+	holding := Holding{FundID: "fund-axi-blue"}
+	nav := 100.0
+	for month := 0; month < 36; month++ {
+		amount := Money(500000)
+		holding.ApplyBuy(UnitsFor(amount, nav), amount)
+		nav += 1.37
+	}
+
+	if holding.InvestedAmount != 36*500000 {
+		t.Errorf("InvestedAmount = %d, want %d — accumulating paise must be exact",
+			holding.InvestedAmount, 36*500000)
+	}
+	// avg = total paise / total units, and it must agree with the totals to the
+	// paise rather than to "about right".
+	want := Money(float64(holding.InvestedAmount)/holding.Units + 0.5)
+	if got := holding.AvgCost(); got != want && got != want-1 {
+		t.Errorf("AvgCost() = %d, want %d derived from the totals", got, want)
+	}
+}
+
+func TestApplyBuyWeightsTheAverage(t *testing.T) {
+	holding := Holding{FundID: "fund-axi-blue"}
+	holding.ApplyBuy(10, 100000) // 10 units at ₹100.00
+	holding.ApplyBuy(30, 600000) // 30 units at ₹200.00
+
+	// The weighted average is ₹175.00, not the ₹150.00 an unweighted mean of
+	// the two prices would give.
+	if got := holding.AvgCost(); got != 17500 {
+		t.Errorf("AvgCost() = %d (%s), want 17500 (₹175.00)", got, got)
+	}
+}
+
+func TestApplySellReleasesCostAtAverage(t *testing.T) {
+	holding := Holding{FundID: "fund-axi-blue", Units: 40, InvestedAmount: 700000}
+
+	released, err := holding.ApplySell(10)
+	if err != nil {
+		t.Fatalf("ApplySell() error = %v", err)
+	}
+	// A quarter of the units carries a quarter of the basis: ₹1,750.00.
+	if released != 175000 {
+		t.Errorf("released = %d, want 175000", released)
+	}
+	if holding.Units != 30 || holding.InvestedAmount != 525000 {
+		t.Errorf("position = %v / %d, want 30 / 525000", holding.Units, holding.InvestedAmount)
+	}
+	if got := holding.AvgCost(); got != 17500 {
+		t.Errorf("AvgCost() = %d after a partial sale, want it unchanged at 17500", got)
+	}
+}
+
+// TestApplySellClosesCleanly is the special case that keeps the ledger honest:
+// the last sale releases whatever paise remain in full, so a closed position
+// never leaves a basis attached to no units.
+func TestApplySellClosesCleanly(t *testing.T) {
+	holding := Holding{FundID: "fund-axi-blue", Units: 3, InvestedAmount: 100000}
+
+	// Three sales of one unit each. 100000/3 does not divide evenly, so a purely
+	// proportional release would strand a paise or two on the last one.
+	for i := 0; i < 3; i++ {
+		if _, err := holding.ApplySell(1); err != nil {
+			t.Fatalf("ApplySell() %d error = %v", i+1, err)
+		}
+	}
+
+	if !holding.IsClosed() {
+		t.Errorf("IsClosed() = false with %v units remaining", holding.Units)
+	}
+	if holding.InvestedAmount != 0 {
+		t.Errorf("InvestedAmount = %d after a full exit, want 0", holding.InvestedAmount)
+	}
+}
+
+func TestApplySellRejectsOversell(t *testing.T) {
+	holding := Holding{FundID: "fund-axi-blue", Units: 5, InvestedAmount: 50000}
+
+	if _, err := holding.ApplySell(5.001); err == nil {
+		t.Fatal("ApplySell() accepted a sale larger than the position")
+	}
+	if holding.Units != 5 || holding.InvestedAmount != 50000 {
+		t.Errorf("position = %v / %d after a rejected sale, want it untouched",
+			holding.Units, holding.InvestedAmount)
+	}
+
+	if _, err := holding.ApplySell(0); err == nil {
+		t.Error("ApplySell() accepted a zero-unit sale")
+	}
+}
+
+// TestApplySellToleratesFloatDrift covers the epsilon: a full exit must succeed
+// even when the two unit counts differ in their last bit, which is the normal
+// case rather than an edge one.
+func TestApplySellToleratesFloatDrift(t *testing.T) {
+	holding := Holding{FundID: "fund-axi-blue"}
+	holding.ApplyBuy(0.1, 1000)
+	holding.ApplyBuy(0.2, 2000)
+	// 0.1 + 0.2 is 0.30000000000000004, so selling a literal 0.3 is selling
+	// very slightly less than the position holds — and must still close it.
+	if _, err := holding.ApplySell(0.3); err != nil {
+		t.Fatalf("ApplySell(0.3) error = %v", err)
+	}
+	if !holding.IsClosed() {
+		t.Errorf("IsClosed() = false, %v units of float residue survived", holding.Units)
+	}
+}
+
+func TestUnitsForRefusesUnpricedFills(t *testing.T) {
+	// A NAV of zero is what resolveNAV returns when the upstream feed is down.
+	// Returning +Inf units here would corrupt a customer's position permanently.
+	for _, nav := range []float64{0, -1} {
+		if got := UnitsFor(150000, nav); got != 0 {
+			t.Errorf("UnitsFor(_, %v) = %v, want 0", nav, got)
+		}
+	}
+
+	// ₹1,500.00 at a NAV of ₹125.00 buys 12 units.
+	if got := UnitsFor(150000, 125); got != 12 {
+		t.Errorf("UnitsFor(150000, 125) = %v, want 12", got)
+	}
+}
+
+// TestBuyThenValueRoundTrips ties the two halves together: units bought at a
+// NAV, then valued at the same NAV, must be worth what was paid. Any systematic
+// bias in either conversion shows up here as a difference.
+func TestBuyThenValueRoundTrips(t *testing.T) {
+	amount := Money(150000)
+	nav := 125.45
+
+	holding := Holding{FundID: "fund-axi-blue"}
+	holding.ApplyBuy(UnitsFor(amount, nav), amount)
+
+	valued := holding.Value(nav)
+	if diff := valued.UnrealizedGain; diff > 1 || diff < -1 {
+		t.Errorf("UnrealizedGain = %d paise immediately after purchase, want within 1 paise of 0", diff)
+	}
+}

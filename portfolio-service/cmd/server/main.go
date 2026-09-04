@@ -1,5 +1,12 @@
 // Command server is the portfolio-service entry point. It serves the internal
-// gRPC valuation API plus a small HTTP mux carrying the Kubernetes probes.
+// gRPC valuation API, a small HTTP mux carrying the Kubernetes probes, and the
+// Kafka consumer that builds holdings from executed orders.
+//
+// This process is now two things at once — a synchronous read API and an
+// asynchronous worker — and the shutdown sequence below is written around that.
+// The consumer is stopped first and the API last, so a pod being drained
+// finishes applying the fill it is holding before it stops answering questions
+// about the positions that fill belongs to.
 //
 // Engineered by Dhanush C N (github.com/dhanush-cn)
 package main
@@ -22,6 +29,7 @@ import (
 
 	"github.com/dhanush-cn/fundkit/portfolio-service/internal/cache"
 	"github.com/dhanush-cn/fundkit/portfolio-service/internal/config"
+	"github.com/dhanush-cn/fundkit/portfolio-service/internal/consumer"
 	"github.com/dhanush-cn/fundkit/portfolio-service/internal/handler"
 	"github.com/dhanush-cn/fundkit/portfolio-service/internal/platform/logging"
 	"github.com/dhanush-cn/fundkit/portfolio-service/internal/platform/metrics"
@@ -64,11 +72,23 @@ func run() error {
 	}()
 
 	portfolioService := service.NewPortfolioService(
-		repository.NewHoldingsRepository(),
+		repository.NewHoldingsRepository(cfg.Ledger.SeedHoldings),
 		repository.NewNAVSource(),
 		redisClient,
 		logger,
 	)
+
+	// The ledger's write path. It shares the service instance with the gRPC
+	// handlers rather than getting its own, which is the point: one repository,
+	// one lock, so a valuation read can never observe a half-applied fill.
+	deadLetters := consumer.NewDeadLetterPublisher(cfg.Kafka, promRegistry.Kafka, logger)
+	defer func() {
+		if err := deadLetters.Close(); err != nil {
+			logger.Error("failed to close dead-letter publisher", slog.String("error", err.Error()))
+		}
+	}()
+
+	orderConsumer := consumer.New(cfg.Kafka, portfolioService, deadLetters, promRegistry.Kafka, logger)
 
 	// Interceptor order is the same argument as the HTTP middleware order in
 	// the other services: the recorder sits outside the timeout, so an RPC the
@@ -111,6 +131,17 @@ func run() error {
 	// to delay a readiness probe and get the pod cycled out of rotation.
 	metricsServer := metrics.NewServer(":"+cfg.Service.MetricsPort, promRegistry)
 
+	// consumerStopped is closed when the consumer loop has returned, so the
+	// shutdown path below can wait for the in-flight event to finish rather
+	// than racing it.
+	consumerStopped := make(chan struct{})
+	go func() {
+		defer close(consumerStopped)
+		if err := orderConsumer.Run(ctx); err != nil {
+			logger.Error("kafka consumer stopped with error", slog.String("error", err.Error()))
+		}
+	}()
+
 	serverErr := make(chan error, 2)
 
 	go func() {
@@ -150,6 +181,25 @@ func run() error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Service.ShutdownTimeout)
 	defer cancel()
+
+	// The consumer goes first. Its Run loop is already unwinding — it watches
+	// the same cancelled context — and closing the reader is what makes the
+	// group rebalance immediately instead of waiting out the session timeout
+	// with a partition assigned to a process that has stopped reading it.
+	//
+	// The wait is bounded by the same shutdown budget as everything else. An
+	// event still in its retry backoff loses the race and is redelivered after
+	// restart, which the ledger's deduplication absorbs — that is precisely why
+	// the offset is committed after the apply and not before.
+	if err := orderConsumer.Close(); err != nil {
+		logger.Error("failed to close kafka reader", slog.String("error", err.Error()))
+	}
+	select {
+	case <-consumerStopped:
+		logger.Info("kafka consumer drained")
+	case <-shutdownCtx.Done():
+		logger.Warn("kafka consumer did not drain within the shutdown budget; in-flight event will be redelivered")
+	}
 
 	// Report NOT_SERVING first so load balancers stop routing before the
 	// in-flight RPCs are drained.
