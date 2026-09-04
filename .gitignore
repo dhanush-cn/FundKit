@@ -35,3 +35,6 @@ coverage.out
 
 # Personal interview notes - never commit
 INTERVIEW_PREP.md
+
+# Load test output
+perf/results/*.json

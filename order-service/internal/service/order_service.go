@@ -114,10 +114,14 @@ func (s *OrderService) Place(ctx context.Context, input domain.NewOrder) (*domai
 	// will have it on Kafka within one poll interval.
 	s.startLifecycle(ctx, order.ID)
 
+	// The amount is logged twice on purpose: amount_paise is the exact value a
+	// query or an alert threshold should match on, and amount is the rendered
+	// form a human reading the log actually wants to see.
 	s.logger.InfoContext(ctx, "order placed",
 		slog.String("order_id", order.ID),
 		slog.String("user_id", order.UserID),
-		slog.Float64("amount", order.Amount),
+		slog.Int64("amount_paise", order.Amount.Paise()),
+		slog.String("amount", order.DisplayAmount()),
 	)
 	return order, nil
 }
@@ -225,7 +229,7 @@ func (s *OrderService) processLifecycle(ctx context.Context, orderID string) {
 	}
 
 	final := domain.StatusExecuted
-	if order.Amount <= 0 {
+	if !order.Amount.IsPositive() {
 		final = domain.StatusFailed
 	}
 

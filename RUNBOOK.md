@@ -173,7 +173,7 @@ Invoke-RestMethod -Uri http://localhost:8080/auth/me -Headers $headers
 #    subject and ignores anything the client claims.
 $order = @{
   fund_id         = "axis-bluechip"
-  amount          = 5000
+  amount          = 500000   # paise: 500000 = ₹5,000.00
   type            = "SIP"
   idempotency_key = "demo-key-001"
 } | ConvertTo-Json
@@ -193,6 +193,7 @@ try {
 # 4. List orders (wait ~3s after placing to see EXECUTED)
 Invoke-RestMethod -Uri http://localhost:8080/orders -Headers $headers |
   Format-Table id, fund_id, amount, status, created_at
+# amount is in paise: 500000 is ₹5,000.00.
 
 # 5. P&L - this one crosses the gRPC hop to portfolio-service
 Invoke-RestMethod -Uri "http://localhost:8080/portfolio/$($session.user_id)/pnl" -Headers $headers
@@ -214,7 +215,7 @@ try {
 $spoofed = @{ Authorization = "Bearer $($session.token)"; "x-fundkit-user-id" = "victim" }
 Invoke-RestMethod -Method Post -Uri http://localhost:8080/orders `
   -Headers $spoofed -ContentType application/json `
-  -Body (@{ fund_id = "axis-bluechip"; amount = 1000; type = "SIP"; idempotency_key = "spoof-001" } | ConvertTo-Json) |
+  -Body (@{ fund_id = "axis-bluechip"; amount = 100000; type = "SIP"; idempotency_key = "spoof-001" } | ConvertTo-Json) |
   Select-Object user_id   # still your own id
 ```
 
@@ -228,7 +229,7 @@ $traced = @{ Authorization = "Bearer $token"; "x-request-id" = "trace-me-12345" 
 $body = @{
   user_id         = "user-1"
   fund_id         = "hdfc-top-100"
-  amount          = 7500
+  amount          = 750000   # paise: ₹7,500.00
   type            = "LUMPSUM"
   idempotency_key = "trace-demo-001"
 } | ConvertTo-Json
@@ -256,6 +257,105 @@ docker compose exec kafka kafka-console-consumer --bootstrap-server localhost:90
 ```powershell
 docker compose exec postgres psql -U fundkit -d fundkit_db -c "SELECT id, user_id, amount, status FROM orders ORDER BY created_at DESC LIMIT 5;"
 ```
+
+---
+
+## Part 3b — Database migrations
+
+The schema is **not** created on boot. order-service verifies on startup that
+migrations have been applied and exits if they have not, so a missing migration
+is a container that refuses to start with a clear message rather than a 500 on
+the first request that touches a missing column.
+
+`docker compose up` handles this for you: a one-shot `migrate` service runs
+before order-service, and order-service waits for it via
+`service_completed_successfully`. The commands below are for when you are
+running services outside compose, or need to inspect or roll back.
+
+```powershell
+make migrate-up        # apply everything pending (idempotent — safe to re-run)
+make migrate-version   # what version is this database on?
+make migrate-down      # roll back exactly one migration
+```
+
+Point them anywhere with `DB_URL`:
+
+```powershell
+make migrate-up DB_URL="postgres://user:pass@host:5432/db?sslmode=disable"
+```
+
+Without a local `migrate` binary the Makefile falls back to the official
+container automatically, so a fresh clone needs only Docker.
+
+**As a raw CLI command**, if you would rather not go through make:
+
+```powershell
+migrate -path order-service/migrations `
+  -database "postgres://fundkit:password@localhost:5433/fundkit_db?sslmode=disable&x-migrations-table=order_service_schema_migrations" `
+  up
+```
+
+**As an init step** in Kubernetes, the same thing runs as an init container on
+the order-service Deployment; the .sql files are mounted from a ConfigMap
+generated straight from the repository:
+
+```powershell
+make migrate-configmap | kubectl apply -f -
+kubectl apply -f k8s/order-service-deployment.yaml
+```
+
+### Adding a migration
+
+```powershell
+make migrate-create NAME=add_settlement_date
+```
+
+Write the `.up.sql` and its inverse in `.down.sql`, then bump
+`RequiredSchemaVersion` in `order-service/internal/repository/postgres.go` in
+the same commit. That pairing is what makes "someone forgot to migrate" a
+refusal to start rather than a runtime error.
+
+### If a migration fails half-way
+
+golang-migrate marks the version dirty and order-service will refuse to start.
+Do **not** just re-run `up` — look at what actually applied, repair it by hand,
+then tell the tool which version to believe:
+
+```powershell
+make migrate-version              # shows the dirty version
+make migrate-force VERSION=1      # only after you have repaired the schema
+```
+
+---
+
+## Part 3c — The dead-letter queue
+
+notification-service retries a failing event three times with exponential
+backoff, then republishes it to `order_events_dlq` — payload byte-identical,
+failure reason and origin offset attached as headers — and only then commits the
+offset. Nothing is dropped, and a poison message stops blocking its partition.
+
+Errors marked permanent (an unparseable payload, an envelope version this build
+does not read) skip the retries entirely and are parked immediately.
+
+```powershell
+# What is sitting in the dead-letter topic?
+docker compose exec kafka kafka-console-consumer `
+  --bootstrap-server localhost:9092 --topic order_events_dlq `
+  --from-beginning --property print.headers=true --timeout-ms 5000
+
+# How deep is it? A non-zero, growing count is the thing to alert on.
+docker compose exec kafka kafka-run-class kafka.tools.GetOffsetShell `
+  --bootstrap-server localhost:9092 --topic order_events_dlq
+```
+
+Useful metrics on notification-service's `/metrics`:
+
+| Metric | Means |
+| --- | --- |
+| `kafka_events_dead_lettered_total{reason}` | messages parked, by cause |
+| `kafka_event_retries_total` | re-attempts; rising with a flat DLQ rate is a dependency wobbling but recovering |
+| `kafka_dlq_publish_failures_total` | **page on this** — the safety net itself is down, and the consumer is deliberately stuck rather than lossy |
 
 ---
 
@@ -403,10 +503,12 @@ npm test
 ### Integration tests (real Postgres, Redis and Kafka)
 
 These are behind the `integration` build tag, so they never run by accident. Start the backing
-services first — the stack from Part 1 is enough:
+services first, then apply the migrations — order-service no longer creates its own schema, so
+`OpenPostgres` fails fast if the tables are not there yet:
 
 ```powershell
 docker compose up -d postgres redis kafka
+docker compose run --rm migrate
 
 $env:FUNDKIT_TEST_DB_URL    = "postgres://fundkit:password@localhost:5433/fundkit_db?sslmode=disable"
 $env:FUNDKIT_TEST_REDIS_URL = "localhost:6380"

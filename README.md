@@ -54,18 +54,27 @@ Module path: `github.com/dhanush-cn/fundkit`
                                               │  topic: order_events   │
                                               │  partitioned by order  │
                                               └───────────┬────────────┘
-                                                          │ consumer group
-                                                          │ manual offset commit
-                                                          ▼
-                                              ┌────────────────────────┐
-                                              │ NOTIFICATION SERVICE   │  :8083
-                                              │ email + SMS fan-out    │
-                                              │ dedupe on event_id     │
-                                              └────────────────────────┘
+                                                  ┌────────┴────────┐
+                                     consumer group:         consumer group:
+                                fundkit-portfolio-       fundkit-notification-
+                                       workers                   workers
+                                          │                         │
+                                          ▼                         ▼
+                              ┌────────────────────────┐  ┌────────────────────────┐
+                              │ PORTFOLIO SERVICE       │  │ NOTIFICATION SERVICE   │  :8083
+                              │ (same process as above) │  │ email + SMS fan-out    │
+                              │ builds holdings from    │  │ dedupe on event_id     │
+                              │ EXECUTED fills, dedupe  │  └────────────────────────┘
+                              │ on event_id, DLQ on     │
+                              │ permanent/exhausted     │
+                              │ failure                 │
+                              └────────────────────────┘
 ```
 
 **Request path**: `Client → API Gateway (HTTP/JWT) → Order Service (HTTP) → Portfolio Service (gRPC)`
-**Event path**: `Order Service → Kafka order_events → Notification Worker`
+**Event path**: `Order Service → Kafka order_events → {Portfolio Service ledger, Notification Worker}` —
+two independent consumer groups on the same topic, so a notification outage can never stall the
+ledger, and a NAV feed outage stalling the ledger can never delay a notification.
 
 The synchronous path and the asynchronous path are deliberately separate. A read that a user is
 waiting on takes the gRPC hop; a state change that other parts of the system need to know about
@@ -87,12 +96,15 @@ multiplexes calls over one connection, and deadlines propagate through the wire 
 than being reinvented per client. REST is kept at the edge, where the client is a browser and
 human debuggability matters more than encoding efficiency.
 
-**Apache Kafka for events.** Order status changes have more than one interested party and the
-list will grow — notifications today, ledger and analytics tomorrow. A durable, replayable log
-decouples the producer from that list entirely: order-service does not know who consumes
-`order_events`, and a consumer that was down for an hour catches up from its committed offset
-instead of losing an hour of history. Keying by order id keeps all events for one order on one
-partition, so per-order ordering survives horizontal scaling.
+**Apache Kafka for events.** Order status changes have more than one interested party — customer
+notifications and the portfolio ledger both need to know today, and analytics will want the same
+feed tomorrow. A durable, replayable log decouples the producer from that list entirely:
+order-service does not know who consumes `order_events`, and a consumer that was down for an hour
+catches up from its committed offset instead of losing an hour of history. Each consumer runs its
+own consumer group and its own dead-letter topic, so notification-service and portfolio-service
+read every event independently — one falling behind or failing cannot stall the other. Keying by
+order id keeps all events for one order on one partition, so per-order ordering survives horizontal
+scaling.
 
 **PostgreSQL per service.** The order table is the system of record for money movements, so it
 gets ACID transactions and a unique index on the idempotency key. Services do not read each
@@ -113,6 +125,7 @@ which is read on every valuation but changes once a day.
 | Duplicate protection | Redis `SETNX` **and** a unique DB index | Redis alone | Redis is the fast guard; the unique constraint is the authority. A cache eviction cannot become a double purchase. |
 | Event ordering | Partition key = order id | Round-robin partitioning | Guarantees per-order ordering while still allowing the consumer group to scale out. |
 | Consumer offsets | Manual commit after handling | Auto-commit | At-least-once with real redelivery. Handlers deduplicate on `event_id` to make reprocessing safe. |
+| Ledger writes (portfolio-service) | Idempotent apply, under the same lock as the mutation, keyed on `event_id` | Trusting commit ordering alone | At-least-once delivery means a crash between applying a fill and committing its offset redelivers that event. Applying a `BUY` twice would double a customer's position, so the safety property lives in the ledger, not the transport — a duplicate is detected and skipped before it touches state. |
 | Data ownership | A database per service | One shared schema | Independent deploys and schema evolution; no service is coupled to another's table layout. |
 | Rate limiting | In-process token bucket per pod | Redis-backed global quota | Zero added latency for coarse abuse protection. The tradeoff is accepted and documented: N replicas allow N× the configured rate. |
 | Gateway readiness | Ready when the identity store is reachable, regardless of upstream health | Readiness follows every dependency | One restarting downstream service must not take the entire edge out of rotation — the gateway can still authenticate callers and return honest 502s. Postgres is the exception: without it nobody can sign in at all. |
@@ -120,7 +133,11 @@ which is read on every valuation but changes once a day.
 | Password storage | bcrypt with a configurable cost | SHA-256, or a salted digest of my own | The work factor is the mechanism: it makes each guess expensive. Rolling your own is how password databases get cracked in an afternoon. |
 | Customer contact details | Copied onto the order and carried on the event | Looked up from identity when an alert is sent | Notification delivery stays fully asynchronous: identity being slow or down cannot stall the alert pipeline. The cost is a snapshot that goes stale if the customer edits their profile, which is acceptable for addressing a message rather than authorising one. |
 | Order lifecycle worker | Goroutine on a detached context | Request-scoped goroutine | `context.WithoutCancel` keeps the correlation id while dropping the caller's cancellation, so an order is not abandoned mid-transition when the client hangs up. |
-| Money representation | `float64` for display valuations | Integer minor units everywhere | Honest scoping: NAV valuations are presentational. A production ledger would use integer paise end to end. |
+| Money representation | **Chosen:** integer paise (`int64`) in the domain, the database and on the wire | **Rejected:** `float64` rupees | `0.1 + 0.2 != 0.3` in IEEE-754, so a float ledger drifts by a few paise per reconciliation and nobody can reproduce the complaint. The column is `BIGINT`, the JSON field is an integer, and a client sending the decimal `100.50` gets a 400 rather than a silent truncation. Units and NAV are the one deliberate exception and stay `float64` — a unit count is genuinely fractional and a NAV is a quoted price, so neither one is money. |
+| Money on the gRPC contract | Converted to `double` at the portfolio boundary | Changing the `.proto` to `int64` in the same commit | The internals are exact either way. The `.proto` is a published contract, so changing its units is a breaking release of its own rather than a side effect of an internal refactor. The conversion is confined to two functions in `grpc_server.go`. |
+| Unprocessable events | Retry three times, then park on a per-consumer DLQ topic (`order_events_dlq` for notifications, `order_events_portfolio_dlq` for the ledger) | Retry forever, commit and drop, or one shared DLQ | Retrying forever stalls the partition and every message behind it; dropping loses a customer's event with only a log line as evidence. A shared DLQ would mean replaying a parked event hands it to both consumers again, so fixing the ledger could re-send a customer's email. Parking keeps the partition moving and turns "things needing a human" into a queue with a depth you can alert on. The offset is committed only after the park succeeds — if the DLQ write fails, the consumer would rather be stuck and visible than moving and lossy. |
+| Retry classification | By error type (`domain.ErrPermanent`), not by attempt count | A flat retry budget for every failure | A provider timeout deserves several attempts; an unreadable schema version deserves none, because every attempt fails identically while the partition waits. |
+| Schema management | Versioned `.sql` files applied by golang-migrate before boot | GORM `AutoMigrate` on startup | AutoMigrate is invisible to review, unordered, raced by replicas, never drops or narrows a column, cannot express a `CHECK` constraint or a partial index, and has no inverse. order-service now *verifies* the schema version on boot and refuses to start if it is behind — a missing migration is a container that will not start, not a 500 on the first request that touches a missing column. |
 
 ---
 
@@ -139,7 +156,7 @@ no call site has to remember to attach it:
 
 ```json
 {"time":"2026-09-02T10:14:22Z","level":"INFO","msg":"order placed","service":"order-service",
- "x-request-id":"9f2c1e5a4b7d8c3e1f0a6b2d5c8e7f31","order_id":"6b7e…","amount":5000}
+ "x-request-id":"9f2c1e5a4b7d8c3e1f0a6b2d5c8e7f31","order_id":"6b7e…","amount_paise":500000,"amount":"₹5,000.00"}
 ```
 
 `grep` one id across all four services and you have the whole request.
@@ -170,10 +187,22 @@ separate from the port that serves customer traffic. That separation is delibera
 | `http_requests_in_flight` | gauge | — | api-gateway, order-service |
 | `grpc_server_requests_total` | counter | `grpc_service`, `grpc_method`, `grpc_code` | portfolio-service |
 | `grpc_server_request_duration_seconds` | histogram | `grpc_service`, `grpc_method` | portfolio-service |
+| `grpc_server_requests_in_flight` | gauge | — | portfolio-service |
 | `kafka_events_published_total` | counter | `topic`, `status` | order-service |
-| `kafka_events_consumed_total` | counter | `topic`, `status` | notification-service |
-| `kafka_event_processing_duration_seconds` | histogram | `topic` | notification-service |
-| `kafka_consumer_lag` | gauge | `topic`, `group` | notification-service |
+| `kafka_events_consumed_total` | counter | `topic`, `status` | portfolio-service, notification-service |
+| `kafka_event_processing_duration_seconds` | histogram | `topic` | portfolio-service, notification-service |
+| `kafka_event_retries_total` | counter | `topic` | portfolio-service, notification-service |
+| `kafka_events_dead_lettered_total` | counter | `topic`, `reason` | portfolio-service, notification-service |
+| `kafka_dlq_publish_failures_total` | counter | `topic` | portfolio-service, notification-service |
+| `kafka_consumer_lag` | gauge | `topic`, `group` | portfolio-service, notification-service |
+
+`status` on `kafka_events_consumed_total` is not identical across the two consumers, and a query
+that sums it needs `job` (or `group`) in its `by (...)` clause now that two services read the same
+topic — see [`monitoring/PROMQL.md`](monitoring/PROMQL.md) for the corrected queries. notification-service
+uses `success` / `error` / `dropped` / `dead_lettered`; portfolio-service uses `success` / `skipped` /
+`error` / `dead_lettered` — `skipped` is the (very common) case of an event on the topic that never
+reached `EXECUTED` and so never touched a position, which notification-service has no equivalent for
+since it acts on every terminal transition.
 
 Plus the standard Go runtime and process collectors on every service: goroutines, heap, GC pause,
 open file descriptors, CPU seconds.
@@ -205,7 +234,9 @@ reporting, which is the honest answer.
 
 And the reason lag is instrumented at all: throughput hides backlog. A worker handling 500 events/s
 looks perfectly healthy right until you notice the producer is doing 700/s and the backlog is an
-hour deep.
+hour deep. On portfolio-service specifically, lag is not just an infrastructure number — it is how
+stale the holdings a customer is currently looking at might be, since the dashboard reflects
+whatever the ledger has consumed so far.
 
 ### Running it
 
@@ -264,7 +295,7 @@ business rules can be tested with fakes and never import gorm, redis or kafka.
 ```
 ├── api-gateway/            edge: JWT, rate limiting, CORS, reverse proxy, health aggregation
 ├── order-service/          order state machine, idempotency, Kafka producer, gRPC client
-├── portfolio-service/      gRPC valuation API, NAV cache-aside, P&L arithmetic
+├── portfolio-service/      gRPC valuation API + Kafka consumer building a real-time ledger, NAV cache-aside
 ├── notification-service/   Kafka consumer group, alert fan-out
 ├── frontend/               React + TypeScript dashboard
 ├── proto/fundkit.proto     internal service contract
@@ -316,11 +347,16 @@ read as a fallback so a running deployment can migrate without a flag day. See
 | `FUNDKIT_RATE_LIMIT_RPS` / `_BURST` | api-gateway | `5` / `10` |
 | `FUNDKIT_DB_URL` *(or `FUNDKIT_DB_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_NAME`)* | api-gateway, order-service | **required** |
 | `FUNDKIT_REDIS_URL` | order, portfolio | `localhost:6379` |
-| `FUNDKIT_KAFKA_BROKERS` | order, notification | `localhost:9092` |
+| `FUNDKIT_KAFKA_BROKERS` | order, portfolio, notification | `localhost:9092` |
+| `FUNDKIT_KAFKA_ORDER_TOPIC` | order, portfolio, notification | `order_events` |
+| `FUNDKIT_KAFKA_CONSUMER_GROUP` | portfolio, notification | `fundkit-portfolio-workers` / `fundkit-notification-workers` — **must differ per service**, or Kafka splits the partitions between them and each sees only half the events, both looking perfectly healthy |
+| `FUNDKIT_KAFKA_DLQ_TOPIC` | portfolio, notification | `order_events_portfolio_dlq` / `order_events_dlq` — must differ from the order topic and from each other, or a replay on one hands the event to both |
+| `FUNDKIT_KAFKA_MAX_ATTEMPTS` | portfolio, notification | `3` |
+| `FUNDKIT_KAFKA_RETRY_BACKOFF` | portfolio, notification | `200ms` |
 | `FUNDKIT_IDEMPOTENCY_TTL` | order-service | `24h` |
 | `FUNDKIT_PORTFOLIO_GRPC_URL` | order-service | `localhost:50051` |
 | `FUNDKIT_NAV_CACHE_TTL` | portfolio-service | `30s` |
-| `FUNDKIT_KAFKA_CONSUMER_GROUP` | notification-service | `fundkit-notification-workers` |
+| `FUNDKIT_SEED_HOLDINGS` | portfolio-service | `true` (`false` in `k8s/config.yaml`) — demo positions for `user-1`/`user-2`; off in a cluster because they are not derived from any event and would double-count on a topic replay |
 
 ---
 
@@ -431,10 +467,17 @@ protoc --proto_path=proto \
    addresses the email you registered with and the SMS channel your phone number, and each alert
    carries the same `x-request-id` as the HTTP request that created the order. A channel with no
    address on file is skipped rather than failing the event.
-5. **Fetch P&L.** Enter a user id (`user-1` or `user-2`) and fetch. order-service calls
-   portfolio-service over gRPC; portfolio-service serves NAV from Redis, falling back to the feed
-   on a miss.
-6. **Trace it.** Take the `x-request-id` from any response header and grep it across
+5. **Watch the ledger update.** portfolio-service runs its own Kafka consumer on `order_events`,
+   in its own consumer group (`fundkit-portfolio-workers`), independent of notification-service's.
+   When step 3's worker marks an order `EXECUTED`, that consumer resolves the fill's NAV, converts
+   the rupee amount into units, and applies a `BUY` or `SELL` to the customer's position — updating
+   the average cost, or closing the position entirely at zero units. Every event is deduplicated by
+   `event_id` under the same lock as the mutation, so an at-least-once redelivery can never double a
+   position.
+6. **Fetch P&L.** Enter a user id (`user-1` or `user-2`) and fetch. order-service calls
+   portfolio-service over gRPC; portfolio-service serves NAV from Redis (falling back to the feed on
+   a miss) and holdings from the ledger step 5 just built.
+7. **Trace it.** Take the `x-request-id` from any response header and grep it across
    `docker compose logs`.
 
 ```bash
@@ -448,11 +491,15 @@ docker compose down -v       # stop and drop the Postgres volume
 
 Stated plainly, because knowing where a system stops is part of designing it:
 
-- **No transactional outbox.** The database commit and the Kafka publish are separate operations;
-  a crash between them loses an event. The fix is an outbox table drained by a relay, which is the
-  natural next iteration.
-- **Holdings are in-memory** in portfolio-service. The valuation logic and the cache-aside path
-  are real; the ledger behind them is a stub with a repository seam ready for Postgres.
+- **Holdings are in-memory and single-replica.** portfolio-service builds a customer's positions by
+  consuming `order_events` itself — average cost, unit accounting and idempotent replay are all
+  real, not a stub — but the ledger lives in process memory, not Postgres. That is why
+  `k8s/portfolio-service-deployment.yaml` is pinned to `replicas: 1`: two replicas in one consumer
+  group would each be assigned different partitions and so hold only some customers' positions, and
+  a read landing on the wrong pod would come back empty for a customer who owns funds. The fix is
+  the same seam every other repository in this codebase already uses — move `HoldingsRepository`
+  behind Postgres, with the position write and the processed-event insert in one transaction —
+  at which point the replicas become interchangeable and the constraint lifts.
 - **Rate limiting is per replica**, not global — see the tradeoff table.
 - **Auth stops short of a full identity product.** Accounts are real — bcrypt-hashed passwords in
   Postgres, algorithm-pinned expiring tokens, uniqueness enforced by database indexes — but there
@@ -461,8 +508,6 @@ Stated plainly, because knowing where a system stops is part of designing it:
 - **Notification channels are simulated.** `LogChannel` emits a structured record instead of
   calling SES or Twilio. The `Channel` interface is the seam: a real provider is an adapter, not a
   change to the notifier.
-- **Metrics are not wired.** Prometheus and Grafana are in the compose file; `/metrics` endpoints
-  are the next thing to add.
 
 ---
 

@@ -11,7 +11,19 @@ data:
   FUNDKIT_REDIS_URL: "redis:6379"
   FUNDKIT_KAFKA_BROKERS: "kafka:9092"
   FUNDKIT_KAFKA_ORDER_TOPIC: "order_events"
-  FUNDKIT_KAFKA_CONSUMER_GROUP: "fundkit-notification-workers"
+  # FUNDKIT_KAFKA_CONSUMER_GROUP is deliberately NOT here. It used to be, and
+  # that was safe only while one service consumed the topic. It is not safe now:
+  # portfolio-service takes envFrom this same ConfigMap, so inheriting the key
+  # would put both consumers in one group, Kafka would split the partitions
+  # between them, and each service would receive roughly half the events while
+  # both looked perfectly healthy. Missing notifications and missing holdings,
+  # no errors anywhere. A consumer group identifies a service, so it is set per
+  # deployment beside the DLQ topic that goes with it.
+  #
+  # Holdings are event-derived in a cluster, so the demo seed positions are off.
+  # They are not produced by any event, and a consumer replaying the topic would
+  # stack real positions on top of invented ones and total the two together.
+  FUNDKIT_SEED_HOLDINGS: "false"
   FUNDKIT_ORDER_SERVICE_URL: "http://order-service:8081"
   FUNDKIT_ORDER_SERVICE_HEALTH_URL: "http://order-service:8081/readyz"
   FUNDKIT_PORTFOLIO_SERVICE_HEALTH_URL: "http://portfolio-service:8082/readyz"

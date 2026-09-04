@@ -226,7 +226,7 @@ func newOrderInput() domain.NewOrder {
 		UserEmail:      "dhanush@example.com",
 		UserPhone:      "+919876543210",
 		FundID:         "quant-small-cap-fund",
-		Amount:         5000,
+		Amount:         500000, // paise: ₹5,000.00
 		Type:           domain.TypeSIP,
 		IdempotencyKey: "key-1",
 	}

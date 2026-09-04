@@ -50,7 +50,7 @@ func executedEvent() domain.OrderEvent {
 	return domain.OrderEvent{
 		EventID:   "evt-1",
 		EventType: domain.EventOrderStatusChanged,
-		Version:   1,
+		Version:   domain.SupportedOrderEventVersion,
 		Order: domain.Order{
 			ID:        "order-1",
 			UserID:    "user-1",
@@ -58,7 +58,7 @@ func executedEvent() domain.OrderEvent {
 			UserEmail: "dhanush@example.com",
 			UserPhone: "+919876543210",
 			FundID:    "quant-small-cap-fund",
-			Amount:    5000,
+			Amount:    500000, // paise: ₹5,000.00
 			Type:      "SIP",
 			Status:    "EXECUTED",
 		},
@@ -91,6 +91,12 @@ func TestNotifierDeliversToEveryChannelOnATerminalEvent(t *testing.T) {
 	}
 	if subject := email.messages[0].Subject; !strings.Contains(subject, "order-1") || !strings.Contains(subject, "EXECUTED") {
 		t.Fatalf("subject = %q", subject)
+	}
+	// The amount is rendered from integer paise with Indian grouping. Asserting
+	// on the exact string is the point: a regression that reads the field as
+	// rupees would produce ₹5,00,000.00 here and this test would catch it.
+	if body := email.messages[0].Body; !strings.Contains(body, "₹5,000.00") {
+		t.Fatalf("body does not render the amount as ₹5,000.00: %q", body)
 	}
 }
 
@@ -180,7 +186,10 @@ func TestNotifierPropagatesProviderFailures(t *testing.T) {
 	}
 }
 
-func TestNotifierIgnoresAnEventWithNoOrder(t *testing.T) {
+// An event with no order used to be logged and ignored, which committed its
+// offset and lost it. It is now a permanent failure, so the consumer parks it
+// on the dead-letter topic where somebody can see that it happened.
+func TestNotifierRejectsAnEventWithNoOrderAsPermanent(t *testing.T) {
 	t.Parallel()
 
 	email := &spyChannel{name: "email"}
@@ -189,11 +198,36 @@ func TestNotifierIgnoresAnEventWithNoOrder(t *testing.T) {
 	event := executedEvent()
 	event.Order.ID = ""
 
-	if err := notifier.Handle(context.Background(), event); err != nil {
-		t.Fatalf("handle: %v", err)
+	err := notifier.Handle(context.Background(), event)
+	if !errors.Is(err, domain.ErrPermanent) {
+		t.Fatalf("error = %v, want one wrapping domain.ErrPermanent so it is dead-lettered without retries", err)
 	}
 	if email.count() != 0 {
-		t.Fatal("an event with no order payload must be ignored, not delivered")
+		t.Fatal("an event with no order payload must not be delivered")
+	}
+}
+
+// A producer deployed ahead of its consumers is the realistic way a version
+// mismatch happens. The consumer must refuse rather than guess, because v1 and
+// v2 differ only in the unit of the amount field — guessing wrong tells a
+// customer their ₹5,000 order was for ₹50.
+func TestNotifierRejectsAnUnsupportedEnvelopeVersion(t *testing.T) {
+	t.Parallel()
+
+	for _, version := range []int{0, 1, 3} {
+		email := &spyChannel{name: "email"}
+		notifier := NewNotifier(discardLogger(), email)
+
+		event := executedEvent()
+		event.Version = version
+
+		err := notifier.Handle(context.Background(), event)
+		if !errors.Is(err, domain.ErrPermanent) {
+			t.Fatalf("version %d: error = %v, want domain.ErrPermanent", version, err)
+		}
+		if email.count() != 0 {
+			t.Fatalf("version %d was delivered; an unreadable envelope must never reach a customer", version)
+		}
 	}
 }
 

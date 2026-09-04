@@ -43,10 +43,22 @@ var LatencyBuckets = []float64{
 // committed and abandoned, while a handler failure leaves the offset alone and
 // will be redelivered. Folding them together would hide a poison-message leak
 // behind a retry rate.
+//
+// "dead_lettered" is separate again: the message left the partition and landed
+// on the DLQ topic, so the offset moved on but nothing was lost. That is a
+// different operational fact from either of the others and wants its own alert.
 const (
-	StatusSuccess = "success"
-	StatusError   = "error"
-	StatusDropped = "dropped"
+	StatusSuccess      = "success"
+	StatusError        = "error"
+	StatusDropped      = "dropped"
+	StatusDeadLettered = "dead_lettered"
+)
+
+// Reasons recorded on kafka_events_dead_lettered_total.
+const (
+	ReasonUnparseable = "unparseable"
+	ReasonPermanent   = "permanent_failure"
+	ReasonExhausted   = "retries_exhausted"
 )
 
 // Registry is this process's metric namespace plus the collectors bound to it.
@@ -77,8 +89,11 @@ func (r *Registry) Gatherer() *prometheus.Registry { return r.prom }
 type Kafka struct {
 	reg prometheus.Registerer
 
-	consumed   *prometheus.CounterVec
-	processing *prometheus.HistogramVec
+	consumed     *prometheus.CounterVec
+	processing   *prometheus.HistogramVec
+	retries      *prometheus.CounterVec
+	deadLettered *prometheus.CounterVec
+	dlqFailures  *prometheus.CounterVec
 }
 
 func newKafka(reg prometheus.Registerer) *Kafka {
@@ -95,10 +110,55 @@ func newKafka(reg prometheus.Registerer) *Kafka {
 			Help:    "Time spent handling one event, from fetch to offset commit. p95 here is the consumer's real service time.",
 			Buckets: LatencyBuckets,
 		}, []string{"topic"}),
+
+		retries: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kafka_event_retries_total",
+			Help: "Handler attempts beyond the first. A rising rate with a flat dead-letter rate is a dependency wobbling but recovering.",
+		}, []string{"topic"}),
+
+		deadLettered: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kafka_events_dead_lettered_total",
+			Help: "Events published to the dead-letter topic, by reason (unparseable, permanent_failure, retries_exhausted).",
+		}, []string{"topic", "reason"}),
+
+		// This is the counter to page on. Every other failure mode here is
+		// contained: the message is either retried or safely parked. A DLQ
+		// publish failure means the safety net itself is down, and the consumer
+		// responds by refusing to commit — so this metric rising is always
+		// accompanied by lag rising, and the pair together says "stuck, on
+		// purpose, needs a human".
+		dlqFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kafka_dlq_publish_failures_total",
+			Help: "Failed attempts to publish to the dead-letter topic. Non-zero means messages cannot be parked and the offset is deliberately held back.",
+		}, []string{"topic"}),
 	}
 
-	reg.MustRegister(k.consumed, k.processing)
+	reg.MustRegister(k.consumed, k.processing, k.retries, k.deadLettered, k.dlqFailures)
 	return k
+}
+
+// ObserveRetry counts one re-attempt of a message that already failed.
+func (k *Kafka) ObserveRetry(topic string) {
+	if k == nil {
+		return
+	}
+	k.retries.WithLabelValues(topic).Inc()
+}
+
+// ObserveDeadLetter counts one message parked on the dead-letter topic.
+func (k *Kafka) ObserveDeadLetter(topic, reason string) {
+	if k == nil {
+		return
+	}
+	k.deadLettered.WithLabelValues(topic, reason).Inc()
+}
+
+// ObserveDLQPublishFailure counts a failure to park a message.
+func (k *Kafka) ObserveDLQPublishFailure(topic string) {
+	if k == nil {
+		return
+	}
+	k.dlqFailures.WithLabelValues(topic).Inc()
 }
 
 // ObserveConsume records the outcome of handling one message. The nil receiver

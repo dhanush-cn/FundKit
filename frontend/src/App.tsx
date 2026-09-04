@@ -1,6 +1,6 @@
 // FundKit Control Center — order control plane dashboard.
 // Engineered by Dhanush C N (github.com/dhanush-cn)
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useState } from 'react';
 import type { FormEvent } from 'react';
 import { motion } from 'framer-motion';
 import {
@@ -24,7 +24,7 @@ import { useOrders } from './hooks/useOrders';
 import { usePortfolio } from './hooks/usePortfolio';
 import { useServiceHealth } from './hooks/useServiceHealth';
 import { API_BASE_URL } from './lib/api';
-import { formatCurrency, formatDate, statusTone } from './lib/format';
+import { formatCurrency, formatDate, formatPaise, rupeesToPaise, statusTone } from './lib/format';
 import type { OrderType } from './types';
 import './App.css';
 
@@ -58,25 +58,42 @@ export default function App() {
 
   const orders = useOrders({ enabled: isAuthenticated, onUnauthorized: auth.logout });
   const health = useServiceHealth(isAuthenticated);
-  const portfolio = usePortfolio();
 
   const [form, setForm] = useState<OrderFormState>(initialForm);
-  const [pnlUserId, setPnlUserId] = useState('');
 
   // The signed-in account is the subject of everything on this screen. The
   // gateway overrides an order's user id with the verified token subject
   // regardless, so anything else shown here would be a lie. Deriving the
   // defaults beats copying them into state with an effect.
   const signedInUserId = auth.user?.id ?? '';
-  const pnlUser = useMemo(() => pnlUserId || signedInUserId, [pnlUserId, signedInUserId]);
+
+  // The P&L widget has no way to ask for anyone else's portfolio: it is
+  // always the signed-in user's own id, polled the same way the order book
+  // is. Even if this were tampered with, the backend independently pins the
+  // response to the gateway-verified identity -- this is defense in depth,
+  // not the only guard.
+  const portfolio = usePortfolio({
+    enabled: isAuthenticated,
+    userId: isAuthenticated ? signedInUserId : null,
+    onUnauthorized: auth.logout,
+  });
 
   const handleSubmit = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
+      // The field holds rupees because that is what a person types; the API
+      // takes paise. Converting here, once, at the boundary, is the same rule
+      // the Go handlers follow — and the conversion is exact, so ₹100.50
+      // becomes 10050 rather than 10049.999999999998.
+      const amountPaise = rupeesToPaise(form.amount);
+      if (!Number.isFinite(amountPaise) || amountPaise <= 0) {
+        return;
+      }
+
       const placed = await orders.placeOrder({
         user_id: signedInUserId,
         fund_id: form.fundId,
-        amount: Number(form.amount),
+        amount: amountPaise,
         type: form.type,
         idempotency_key: form.idempotencyKey,
       });
@@ -177,7 +194,7 @@ export default function App() {
                 {health.allHealthy ? 'Stable' : 'Degraded'}
               </span>
             </div>
-            <div className="hero-card-metric">{formatCurrency(orders.metrics.totalInvested)}</div>
+            <div className="hero-card-metric">{formatPaise(orders.metrics.totalInvested)}</div>
             <div className="hero-card-caption">Capital routed through the order service</div>
             <div className="hero-card-row">
               <span><CheckCircle2 size={14} /> {orders.metrics.executed} executed</span>
@@ -233,11 +250,15 @@ export default function App() {
                 Fund ID
                 <input value={form.fundId} onChange={(event) => setForm({ ...form, fundId: event.target.value })} />
               </label>
+              {/* step is 0.01 so the field can express paise. The old step of 1
+                  could not represent ₹100.50 at all, which is part of why the
+                  rounding question stayed invisible for so long. */}
               <label>
-                Amount
+                Amount (₹)
                 <input
                   type="number"
-                  min="1"
+                  min="0.01"
+                  step="0.01"
                   value={form.amount}
                   onChange={(event) => setForm({ ...form, amount: event.target.value })}
                 />
@@ -315,20 +336,28 @@ export default function App() {
 
           <div className="pnl-controls">
             <label>
-              User ID
-              <input value={pnlUser} onChange={(event) => setPnlUserId(event.target.value)} />
+              Account
+              <input
+                readOnly
+                value={auth.user ? `${auth.user.full_name} (@${auth.user.username})` : signedInUserId}
+              />
             </label>
             <button
               className="ghost-button"
               type="button"
-              onClick={() => void portfolio.fetchPnL(pnlUser)}
+              onClick={() => void portfolio.refresh()}
               disabled={portfolio.loading}
             >
-              {portfolio.loading ? 'Loading…' : 'Fetch P&L'}
+              <RefreshCw size={16} />
+              {portfolio.loading ? 'Refreshing…' : 'Refresh'}
             </button>
           </div>
 
           {portfolio.error && <div className="error-banner">{portfolio.error}</div>}
+
+          {portfolio.loading && !portfolio.pnl && (
+            <div className="empty-state">Loading your P&amp;L…</div>
+          )}
 
           {portfolio.pnl && (
             <div className="pnl-grid">
@@ -342,24 +371,31 @@ export default function App() {
                   {formatCurrency(portfolio.pnl.total_unrealized_gain)}
                 </div>
               </div>
-              <div className="pnl-holdings">
-                {portfolio.pnl.holdings.map((holding) => (
-                  <div key={holding.fund_id} className="pnl-holding">
-                    <div>
-                      <div className="fund-name">{holding.fund_name}</div>
-                      <div className="fund-meta">
-                        Units {holding.units.toFixed(2)} · NAV {holding.nav.toFixed(2)}
+              {portfolio.pnl.holdings.length === 0 ? (
+                <div className="empty-state">
+                  No open positions yet. Place an order above and it will show up here once it
+                  executes.
+                </div>
+              ) : (
+                <div className="pnl-holdings">
+                  {portfolio.pnl.holdings.map((holding) => (
+                    <div key={holding.fund_id} className="pnl-holding">
+                      <div>
+                        <div className="fund-name">{holding.fund_name}</div>
+                        <div className="fund-meta">
+                          Units {holding.units.toFixed(2)} · NAV {holding.nav.toFixed(2)}
+                        </div>
+                      </div>
+                      <div className="pnl-values">
+                        <div>{formatCurrency(holding.current_value)}</div>
+                        <div className={holding.unrealized_gain >= 0 ? 'pnl-positive' : 'pnl-negative'}>
+                          {formatCurrency(holding.unrealized_gain)}
+                        </div>
                       </div>
                     </div>
-                    <div className="pnl-values">
-                      <div>{formatCurrency(holding.current_value)}</div>
-                      <div className={holding.unrealized_gain >= 0 ? 'pnl-positive' : 'pnl-negative'}>
-                        {formatCurrency(holding.unrealized_gain)}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -406,7 +442,7 @@ export default function App() {
                           </div>
                         </div>
                       </td>
-                      <td>{formatCurrency(order.amount)}</td>
+                      <td>{formatPaise(order.amount)}</td>
                       <td>{order.type}</td>
                       <td>
                         <span className={`order-badge order-badge-${statusTone(order.status)}`}>

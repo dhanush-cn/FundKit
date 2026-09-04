@@ -5,6 +5,7 @@ import { ApiError, apiRequest, describeError } from '../lib/api';
 import type { CreateOrderPayload, Order, OrderStatus } from '../types';
 
 export interface OrderMetrics {
+  /** Sum of order amounts in integer paise. Render with formatPaise. */
   totalInvested: number;
   pending: number;
   processing: number;
@@ -142,6 +143,8 @@ export function useOrders({ enabled, pollIntervalMs = 15000, onUnauthorized }: U
   const metrics = useMemo<OrderMetrics>(() => {
     return visibleOrders.reduce<OrderMetrics>(
       (accumulator, order) => {
+        // Integer paise, so this sum is exact however many orders it runs
+        // over — no accumulated float error to round away at the end.
         accumulator.totalInvested += order.amount;
         switch (order.status) {
           case 'PENDING':

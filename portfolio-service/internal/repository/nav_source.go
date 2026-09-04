@@ -32,5 +32,5 @@ func (s *NAVSource) Fetch(_ context.Context, fundID string) (float64, error) {
 		seed = 100.00
 	}
 	jitter := float64(time.Now().Unix()%7) * 0.12
-	return domain.Round2(seed + jitter), nil
+	return domain.RoundNAV(seed + jitter), nil
 }

@@ -19,9 +19,14 @@ type createOrderRequest struct {
 	// UserID is not required in the body: when the request arrives through the
 	// gateway the verified subject wins over anything the client claims, which
 	// is what stops one customer from placing an order in another's name.
-	UserID         string           `json:"user_id"`
-	FundID         string           `json:"fund_id" binding:"required"`
-	Amount         float64          `json:"amount" binding:"required,gt=0"`
+	UserID string `json:"user_id"`
+	FundID string `json:"fund_id" binding:"required"`
+	// Amount is paise: 10050 is ₹100.50. A client that sends the decimal
+	// 100.50 gets a 400 rather than a silent truncation, because
+	// encoding/json refuses to put a fractional number into an integer field.
+	// That failure is the point — it makes a unit mistake loud at the edge
+	// instead of quiet in the ledger.
+	Amount         domain.Money     `json:"amount" binding:"required,gt=0"`
 	Type           domain.OrderType `json:"type" binding:"required,oneof=SIP LUMPSUM"`
 	IdempotencyKey string           `json:"idempotency_key" binding:"required"`
 }

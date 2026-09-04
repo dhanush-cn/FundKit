@@ -33,6 +33,24 @@ type KafkaConfig struct {
 	MaxWait      time.Duration
 	StartOffset  string
 	CommitPolicy string
+
+	// DLQTopic receives messages this service could not process. Kept as its
+	// own topic rather than a status field on the original: a poison message
+	// must leave the partition entirely, or it blocks every message behind it.
+	DLQTopic string
+
+	// MaxAttempts is how many times one message is handed to the handler before
+	// it is dead-lettered, counting the first try. 3 is the default because the
+	// failures worth retrying are transient provider errors, and a failure that
+	// survives three attempts a few hundred milliseconds apart is not one of
+	// them — it is a bad message or a dependency that is properly down, and in
+	// both cases further retries only deepen the backlog.
+	MaxAttempts int
+
+	// RetryBackoff is the base delay between attempts; the consumer doubles it
+	// each time. Bounded and short by design: this is in-process retry, so the
+	// partition is stalled for the whole of it.
+	RetryBackoff time.Duration
 }
 
 func Load() (Config, error) {
@@ -45,18 +63,33 @@ func Load() (Config, error) {
 			ShutdownTimeout: envDuration("SHUTDOWN_TIMEOUT", 15*time.Second),
 		},
 		Kafka: KafkaConfig{
-			Brokers:     envList("KAFKA_BROKERS", []string{"localhost:29092"}, "KAFKA_BROKERS"),
-			OrderTopic:  envString("KAFKA_ORDER_TOPIC", "order_events", ""),
-			GroupID:     envString("KAFKA_CONSUMER_GROUP", "fundkit-notification-workers", ""),
-			MinBytes:    envInt("KAFKA_MIN_BYTES", 1),
-			MaxBytes:    envInt("KAFKA_MAX_BYTES", 10e6),
-			MaxWait:     envDuration("KAFKA_MAX_WAIT", 500*time.Millisecond),
-			StartOffset: envString("KAFKA_START_OFFSET", "last", ""),
+			Brokers:      envList("KAFKA_BROKERS", []string{"localhost:29092"}, "KAFKA_BROKERS"),
+			OrderTopic:   envString("KAFKA_ORDER_TOPIC", "order_events", ""),
+			GroupID:      envString("KAFKA_CONSUMER_GROUP", "fundkit-notification-workers", ""),
+			MinBytes:     envInt("KAFKA_MIN_BYTES", 1),
+			MaxBytes:     envInt("KAFKA_MAX_BYTES", 10e6),
+			MaxWait:      envDuration("KAFKA_MAX_WAIT", 500*time.Millisecond),
+			StartOffset:  envString("KAFKA_START_OFFSET", "last", ""),
+			DLQTopic:     envString("KAFKA_DLQ_TOPIC", "order_events_dlq", ""),
+			MaxAttempts:  envInt("KAFKA_MAX_ATTEMPTS", 3),
+			RetryBackoff: envDuration("KAFKA_RETRY_BACKOFF", 200*time.Millisecond),
 		},
 	}
 
 	if len(cfg.Kafka.Brokers) == 0 {
 		return Config{}, fmt.Errorf("config: FUNDKIT_KAFKA_BROKERS must contain at least one broker")
+	}
+	if cfg.Kafka.DLQTopic == "" {
+		return Config{}, fmt.Errorf("config: FUNDKIT_KAFKA_DLQ_TOPIC must not be empty")
+	}
+	if cfg.Kafka.DLQTopic == cfg.Kafka.OrderTopic {
+		// Catching this at boot rather than at the first failure: a DLQ pointed
+		// at its own source topic turns one poison message into an infinite
+		// republish loop that fills the disk.
+		return Config{}, fmt.Errorf("config: FUNDKIT_KAFKA_DLQ_TOPIC must differ from FUNDKIT_KAFKA_ORDER_TOPIC (both are %q)", cfg.Kafka.DLQTopic)
+	}
+	if cfg.Kafka.MaxAttempts < 1 {
+		return Config{}, fmt.Errorf("config: FUNDKIT_KAFKA_MAX_ATTEMPTS must be at least 1, got %d", cfg.Kafka.MaxAttempts)
 	}
 	return cfg, nil
 }

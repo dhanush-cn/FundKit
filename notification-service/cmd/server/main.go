@@ -53,7 +53,12 @@ func run() error {
 	)
 
 	state := handler.NewConsumerState()
-	orderEvents := consumer.New(cfg.Kafka, notifier, promRegistry.Kafka, logger)
+
+	// The dead-letter publisher is built before the consumer and closed after
+	// it, so there is no window in which the consumer is running with nowhere
+	// to park a message.
+	deadLetters := consumer.NewDeadLetterPublisher(cfg.Kafka, promRegistry.Kafka, logger)
+	orderEvents := consumer.New(cfg.Kafka, notifier, deadLetters, promRegistry.Kafka, logger)
 
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Service.HTTPPort,
@@ -122,6 +127,13 @@ func run() error {
 	workers.Wait()
 	if err := orderEvents.Close(); err != nil {
 		logger.Error("failed to close kafka reader", slog.String("error", err.Error()))
+	}
+
+	// After the reader, because a message being parked as the signal arrived
+	// must still reach the DLQ — its publish context is detached from the
+	// shutdown precisely so that it can.
+	if err := deadLetters.Close(); err != nil {
+		logger.Error("failed to close dead-letter publisher", slog.String("error", err.Error()))
 	}
 
 	// The admin listener goes last so a scrape landing mid-drain still sees the

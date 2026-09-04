@@ -38,6 +38,13 @@ spec:
             - configMapRef:
                 name: fundkit-config
           env:
+            # Moved out of the shared ConfigMap: see the note there. Each
+            # consumer of order_events owns its group and its dead-letter topic.
+            - name: FUNDKIT_KAFKA_CONSUMER_GROUP
+              value: "fundkit-notification-workers"
+            - name: FUNDKIT_KAFKA_DLQ_TOPIC
+              value: "order_events_dlq"
+          env:
             - name: FUNDKIT_HTTP_PORT
               value: "8083"
             - name: FUNDKIT_METRICS_PORT
