@@ -24,18 +24,33 @@ or wider.
 | `grpc_server_requests_in_flight` | gauge | — | portfolio-service |
 | `kafka_events_published_total` | counter | `topic`, `status` | order-service |
 | `kafka_publish_duration_seconds` | histogram | `topic` | order-service |
-| `kafka_events_consumed_total` | counter | `topic`, `status` | notification-service |
-| `kafka_event_processing_duration_seconds` | histogram | `topic` | notification-service |
-| `kafka_consumer_lag` | gauge | `topic`, `group` | notification-service |
+| `kafka_events_consumed_total` | counter | `topic`, `status` | portfolio-service, notification-service |
+| `kafka_event_processing_duration_seconds` | histogram | `topic` | portfolio-service, notification-service |
+| `kafka_event_retries_total` | counter | `topic` | portfolio-service, notification-service |
+| `kafka_events_dead_lettered_total` | counter | `topic`, `reason` | portfolio-service, notification-service |
+| `kafka_dlq_publish_failures_total` | counter | `topic` | portfolio-service, notification-service |
+| `kafka_consumer_lag` | gauge | `topic`, `group` | portfolio-service, notification-service |
 
 `job` and `instance` are added by Prometheus from the scrape config, so no
-metric carries a redundant service label of its own.
+metric carries a redundant service label of its own. **This now matters more
+than it used to**: portfolio-service and notification-service are two separate
+consumer groups reading the *same* `order_events` topic, so every query below
+that groups `kafka_events_consumed_total` or `kafka_event_processing_duration_seconds`
+by `topic` alone is silently summing two different services' numbers into one
+figure that describes neither of them. Add `job` to the `by (...)` clause
+whenever you actually want one consumer's throughput or latency.
 
-`status` is `success` or `error` on the publish counter, and `success`, `error`
-or `dropped` on the consume counter. The third value matters: `error` means the
-offset was not committed and the message will be redelivered, `dropped` means an
-unparseable message was committed and abandoned. Folding them together would
-hide a poison-message leak inside a retry rate.
+`status` on the consume counter is not the same set of values on both services.
+notification-service uses `success`, `error`, `dropped` or `dead_lettered`:
+`error` means the offset was not committed and the message will be redelivered,
+`dropped` means an unparseable message was committed and abandoned. portfolio-service
+has no `dropped` — an unparseable event there goes straight to `dead_lettered`
+with `reason="unparseable"` instead — and adds `skipped` for the (very common)
+case of an event that never reached `EXECUTED` and so never touched a position,
+which notification-service has no equivalent for since it acts on every
+terminal transition. Folding any of these together would hide a poison-message
+leak inside a retry rate, or hide "the ledger is behind" inside "most of the
+topic is just PENDING/PROCESSING noise, as expected."
 
 ---
 
@@ -135,37 +150,57 @@ sum by (grpc_method, grpc_code) (rate(grpc_server_requests_total{grpc_code!="OK"
 ## Kafka
 
 ```promql
-# Production vs consumption. Read them on one panel.
+# Production vs one consumer's consumption. `job` matters here: portfolio-service
+# and notification-service are two independent consumer groups on the same
+# topic, so dropping `job` from the `by (...)` clause sums their two throughputs
+# into one number that answers a question nobody asked.
 sum by (topic) (rate(kafka_events_published_total{status="success"}[$__rate_interval]))
-sum by (topic) (rate(kafka_events_consumed_total{status="success"}[$__rate_interval]))
+sum by (topic, job) (rate(kafka_events_consumed_total{status="success"}[$__rate_interval]))
 
-# Consumer lag: the backlog, not the rate
+# Consumer lag: the backlog, not the rate. `group` already disambiguates the
+# two consumers, so no extra `by` is needed here.
 kafka_consumer_lag
 
-# Is the backlog growing or draining? Positive means falling behind.
+# Is one consumer's backlog growing or draining? Positive means falling behind.
+# Pick the job you care about; comparing published-total against one
+# consumer's total is meaningless if the other consumer is also draining the
+# same topic.
   sum by (topic) (rate(kafka_events_published_total{status="success"}[$__rate_interval]))
-- sum by (topic) (rate(kafka_events_consumed_total{status="success"}[$__rate_interval]))
+- sum by (topic) (rate(kafka_events_consumed_total{status="success", job="portfolio-service"}[$__rate_interval]))
 
-# Projected minutes to drain the current backlog at the current consume rate
-  max(kafka_consumer_lag)
-/ clamp_min(sum(rate(kafka_events_consumed_total{status="success"}[$__rate_interval])), 0.001)
+# Projected minutes to drain one consumer's current backlog at its current rate
+  max(kafka_consumer_lag{group="fundkit-portfolio-workers"})
+/ clamp_min(sum(rate(kafka_events_consumed_total{status="success", job="portfolio-service"}[$__rate_interval])), 0.001)
 / 60
 
 # Outbox relay failing to reach the broker
 sum by (topic) (rate(kafka_events_published_total{status="error"}[$__rate_interval]))
 
-# Poison messages: committed, discarded, gone
-sum by (topic) (rate(kafka_events_consumed_total{status="dropped"}[$__rate_interval]))
+# Poison messages, the way that works for BOTH consumers: an unparseable event
+# always ends up dead-lettered with this reason on either service, whereas
+# `status="dropped"` only exists on notification-service's counter (see the
+# table above) and will silently show zero for portfolio-service.
+sum by (topic, job) (rate(kafka_events_dead_lettered_total{reason="unparseable"}[$__rate_interval]))
 
-# Consumer service time
-histogram_quantile(0.95, sum by (le, topic) (rate(kafka_event_processing_duration_seconds_bucket[$__rate_interval])))
+# Every dead-letter, by reason and by which consumer parked it
+sum by (topic, job, reason) (rate(kafka_events_dead_lettered_total[$__rate_interval]))
+
+# The counter to page on: the safety net itself failing. Non-zero means a
+# consumer cannot park a message and is deliberately holding its offset back —
+# always paired with that consumer's lag rising.
+sum by (topic, job) (rate(kafka_dlq_publish_failures_total[$__rate_interval]))
+
+# Consumer service time, per consumer
+histogram_quantile(0.95, sum by (le, topic, job) (rate(kafka_event_processing_duration_seconds_bucket[$__rate_interval])))
 ```
 
-Throughput alone will not tell you the consumer is failing. A worker handling
+Throughput alone will not tell you a consumer is failing. A worker handling
 500 events/s looks perfectly healthy right up until you notice the producer is
 doing 700/s and the backlog is an hour deep. Lag is the metric that catches it;
 the drain-time query above is the one to quote when someone asks how long
-recovery will take.
+recovery will take. On portfolio-service, lag is a product number as much as
+an infrastructure one — it is how stale the holdings a customer is currently
+looking at might be.
 
 ## Deploy and restart sanity
 
