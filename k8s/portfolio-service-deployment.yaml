@@ -7,7 +7,22 @@ metadata:
     app: portfolio-service
     app.kubernetes.io/part-of: fundkit
 spec:
-  replicas: 2
+  # One replica, and this is a constraint rather than a capacity decision.
+  #
+  # Holdings now live in this process's memory, built from the order_events
+  # stream. Two replicas in one consumer group are assigned different
+  # partitions, so each would hold the positions of the users on its own
+  # partitions and nobody else's. A read balanced onto the wrong replica would
+  # return an empty portfolio for a customer who owns funds — intermittently,
+  # depending on which pod the Service picked, which is close to the worst
+  # possible failure to debug.
+  #
+  # Scaling back up is not a replica-count change; it is the change this
+  # repository has been pointing at all along: move HoldingsRepository to
+  # Postgres, with the position write and the processed-event insert in one
+  # transaction. Shared state makes the replicas interchangeable, and the
+  # partition assignment stops being visible to readers at all.
+  replicas: 1
   selector:
     matchLabels:
       app: portfolio-service
@@ -38,6 +53,16 @@ spec:
             - configMapRef:
                 name: fundkit-config
           env:
+            # Its own consumer group, never the shared one: see the note in
+            # config.yaml for what sharing it would do.
+            - name: FUNDKIT_KAFKA_CONSUMER_GROUP
+              value: "fundkit-portfolio-workers"
+            # Its own dead-letter topic too. A replay is per-consumer — pushing
+            # a parked event back onto order_events would hand it to
+            # notification-service as well, so repairing the holdings would
+            # send the customer a duplicate email.
+            - name: FUNDKIT_KAFKA_DLQ_TOPIC
+              value: "order_events_portfolio_dlq"
             - name: FUNDKIT_HTTP_PORT
               value: "8082"
             - name: FUNDKIT_METRICS_PORT

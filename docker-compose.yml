@@ -172,6 +172,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      # Now a consumer as well as an API: holdings are built from the executed
+      # orders on order_events, so the broker has to be up before it starts.
+      kafka:
+        condition: service_healthy
     environment:
       FUNDKIT_SERVICE_NAME: portfolio-service
       FUNDKIT_GRPC_PORT: "50051"
@@ -180,6 +184,23 @@ services:
       FUNDKIT_LOG_LEVEL: info
       FUNDKIT_REDIS_URL: redis:6379
       FUNDKIT_NAV_CACHE_TTL: 30s
+      FUNDKIT_KAFKA_BROKERS: kafka:9092
+      FUNDKIT_KAFKA_ORDER_TOPIC: order_events
+      # Its own consumer group, so this service and notification-service each
+      # get every event and keep independent offsets. A notification backlog
+      # cannot stall the ledger, and neither can the reverse.
+      FUNDKIT_KAFKA_CONSUMER_GROUP: fundkit-portfolio-workers
+      # Its own DLQ too. A replay is per-consumer: re-driving a parked event
+      # back onto order_events would hand it to both services again, so fixing
+      # the holdings would send the customer a duplicate email.
+      FUNDKIT_KAFKA_DLQ_TOPIC: order_events_portfolio_dlq
+      FUNDKIT_KAFKA_MAX_ATTEMPTS: "3"
+      FUNDKIT_KAFKA_RETRY_BACKOFF: 200ms
+      # Demo positions for user-1 and user-2, so the dashboard shows something
+      # before anyone has placed an order. Off in k8s (see k8s/config.yaml):
+      # seeds are not derived from any event, so a cluster replaying the topic
+      # would stack real holdings on top of invented ones.
+      FUNDKIT_SEED_HOLDINGS: "true"
 
   notification-service:
     build: ./notification-service
