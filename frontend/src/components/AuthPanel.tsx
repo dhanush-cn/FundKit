@@ -8,7 +8,6 @@
 import { useCallback, useState } from 'react';
 import type { FormEvent } from 'react';
 import { motion } from 'framer-motion';
-import { Sparkles } from 'lucide-react';
 
 import type { UseAuth } from '../hooks/useAuth';
 
@@ -59,22 +58,21 @@ export function AuthPanel({ auth }: AuthPanelProps) {
   );
 
   return (
-    <div className="app-shell auth-shell">
+    <div className="auth-shell">
       <motion.div
-        className="panel auth-panel"
-        initial={{ opacity: 0, scale: 0.96 }}
-        animate={{ opacity: 1, scale: 1 }}
+        className="auth-card"
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.25 }}
       >
-        <div className="brand-mark auth-brand">
-          <div className="brand-orb">
-            <Sparkles size={24} />
-          </div>
-          <div>
-            <div className="brand-name" style={{ fontSize: 24 }}>
-              FundKit
-            </div>
-            <div className="brand-subtitle">Control Center</div>
-          </div>
+        <div className="brand auth-brand">
+          <span className="brand-mark brand-mark-lg" aria-hidden="true">
+            FK
+          </span>
+          <span className="brand-text">
+            <span className="brand-name brand-name-lg">FundKit</span>
+            <span className="brand-sub">Control Center</span>
+          </span>
         </div>
 
         <div className="auth-tabs" role="tablist">
@@ -99,9 +97,9 @@ export function AuthPanel({ auth }: AuthPanelProps) {
         </div>
 
         {mode === 'login' ? (
-          <form className="order-form auth-form" onSubmit={(event) => void handleLogin(event)}>
-            <label className="full-width">
-              Username
+          <form className="auth-form" onSubmit={(event) => void handleLogin(event)}>
+            <label className="field">
+              <span className="field-label">Username</span>
               <input
                 name="username"
                 autoComplete="username"
@@ -112,8 +110,8 @@ export function AuthPanel({ auth }: AuthPanelProps) {
                 required
               />
             </label>
-            <label className="full-width">
-              Password
+            <label className="field">
+              <span className="field-label">Password</span>
               <input
                 name="password"
                 type="password"
@@ -125,38 +123,40 @@ export function AuthPanel({ auth }: AuthPanelProps) {
                 required
               />
             </label>
-            <button className="submit-button" type="submit" disabled={auth.loading}>
+            <button className="button button-primary button-block" type="submit" disabled={auth.loading}>
               {auth.loading ? 'Signing in…' : 'Sign in'}
             </button>
           </form>
         ) : (
-          <form className="order-form auth-form" onSubmit={(event) => void handleRegister(event)}>
-            <label>
-              Username
-              <input
-                name="username"
-                autoComplete="username"
-                value={registration.username}
-                onChange={(event) =>
-                  setRegistration({ ...registration, username: event.target.value })
-                }
-                required
-              />
-            </label>
-            <label>
-              Full name
-              <input
-                name="full_name"
-                autoComplete="name"
-                value={registration.full_name}
-                onChange={(event) =>
-                  setRegistration({ ...registration, full_name: event.target.value })
-                }
-                required
-              />
-            </label>
-            <label className="full-width">
-              Email
+          <form className="auth-form" onSubmit={(event) => void handleRegister(event)}>
+            <div className="field-row">
+              <label className="field">
+                <span className="field-label">Username</span>
+                <input
+                  name="username"
+                  autoComplete="username"
+                  value={registration.username}
+                  onChange={(event) =>
+                    setRegistration({ ...registration, username: event.target.value })
+                  }
+                  required
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Full name</span>
+                <input
+                  name="full_name"
+                  autoComplete="name"
+                  value={registration.full_name}
+                  onChange={(event) =>
+                    setRegistration({ ...registration, full_name: event.target.value })
+                  }
+                  required
+                />
+              </label>
+            </div>
+            <label className="field">
+              <span className="field-label">Email</span>
               <input
                 name="email"
                 type="email"
@@ -166,8 +166,8 @@ export function AuthPanel({ auth }: AuthPanelProps) {
                 required
               />
             </label>
-            <label className="full-width">
-              Phone
+            <label className="field">
+              <span className="field-label">Phone</span>
               <input
                 name="phone"
                 type="tel"
@@ -178,8 +178,8 @@ export function AuthPanel({ auth }: AuthPanelProps) {
                 required
               />
             </label>
-            <label className="full-width">
-              Password
+            <label className="field">
+              <span className="field-label">Password</span>
               <input
                 name="password"
                 type="password"
@@ -192,30 +192,30 @@ export function AuthPanel({ auth }: AuthPanelProps) {
                 required
               />
             </label>
-            <button className="submit-button" type="submit" disabled={auth.loading}>
+            <button className="button button-primary button-block" type="submit" disabled={auth.loading}>
               {auth.loading ? 'Creating account…' : 'Create account'}
             </button>
           </form>
         )}
 
         {auth.error && (
-          <div className="error-banner" role="alert" style={{ marginTop: 16 }}>
+          <div className="error-banner" role="alert">
             {auth.error}
           </div>
         )}
 
-        <div className="helper-text auth-note">
+        <p className="helper-text auth-note">
           {mode === 'login'
             ? 'The gateway verifies your password against a bcrypt hash and returns a signed, expiring token.'
             : 'Your email and phone are stored with the account and travel with every order, so execution alerts reach you rather than a placeholder address.'}
-        </div>
+        </p>
 
-        <div className="author-credit" style={{ marginTop: 20, textAlign: 'center' }}>
+        <p className="auth-credit">
           Engineered by{' '}
           <a href={AUTHOR_URL} target="_blank" rel="noreferrer">
             {AUTHOR}
           </a>
-        </div>
+        </p>
       </motion.div>
     </div>
   );

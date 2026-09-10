@@ -41,15 +41,15 @@ export class ErrorBoundary extends Component<Props, State> {
     }
 
     return (
-      <div className="app-shell" style={{ justifyContent: 'center', alignItems: 'center' }}>
-        <div className="panel" style={{ maxWidth: 520, margin: '0 auto' }}>
-          <h2>Something went wrong</h2>
-          <p style={{ color: 'var(--text-secondary)' }}>
+      <div className="crash-shell">
+        <div className="panel crash-panel">
+          <h2 className="panel-title">Something went wrong</h2>
+          <p className="helper-text">
             The dashboard hit an unexpected error and stopped rendering. The backend services are
-            unaffected.
+            unaffected — this is a UI fault, not an outage.
           </p>
-          <div className="error-banner" style={{ marginBottom: 16 }}>{error.message}</div>
-          <button className="submit-button" type="button" onClick={this.handleReset}>
+          <div className="error-banner">{error.message}</div>
+          <button className="button button-primary" type="button" onClick={this.handleReset}>
             Try again
           </button>
         </div>
