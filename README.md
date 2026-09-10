@@ -268,6 +268,52 @@ Query recipes, including how to project backlog drain time, are in
 
 ---
 
+## The Control Center
+
+The dashboard is not a scaffold. It is four routed pages over the same gateway every other client
+uses, and it is where the system's behaviour is easiest to see.
+
+| Page | What it is for |
+|---|---|
+| **Overview** | Read-only summary — capital routed, order counters, recent orders, position summary. Safe to leave open on a second monitor. |
+| **Order desk** | Place an order; filter by status and type; search across fund, order id and idempotency key; sort any column; open a detail drawer with the full lifecycle; advance or cancel. |
+| **Portfolio** | Allocation ring and a sortable holdings table with per-fund NAV, units and unrealised gain. |
+| **System health** | Per-service `/readyz` latency, the order topology, and how one `x-request-id` threads through HTTP, gRPC metadata and Kafka headers. |
+
+The order detail drawer annotates each transition with the infrastructure step behind it — the
+Redis idempotency claim, the Postgres write, the Kafka publish the portfolio and notification
+consumers read — so the drawer explains the distributed system rather than just reporting a status
+string.
+
+Two implementation notes worth the space. Routing is by **hash**, because this bundle is served
+behind the gateway and the gateway has no catch-all rewrite: a hard refresh on `/orders` would
+reach the Go router and 404. And the four polling hooks are instantiated **once above the router**
+rather than per page — each owns a 15s interval, so mounting them per page would restart every poll
+on navigation and let the overview's counters disagree with the order book.
+
+There is no charting or routing dependency. The allocation ring, the topology diagram and the
+router are about 250 lines of hand-written SVG and `useSyncExternalStore` between them.
+
+**Design system.** Three brand colours — navy `#110E7A`, white, gold `#FFBD00` — defined as tokens
+in `frontend/src/index.css`. Depth comes from four solid navy planes, never a gradient:
+`grep -E '(linear|radial|conic)-gradient' frontend/src/*.css` returns nothing, and a hit is a
+regression. Gold is reserved for the primary action, the active nav item and the focus ring. The
+only non-brand hues are a gain/loss pair, used on numeric values and nothing else — a portfolio
+screen has to say which way a figure moved, and gold cannot mean that while it is also the call to
+action.
+
+Screenshots of every page live in
+[`frontend/docs/screenshots/`](frontend/docs/screenshots/).
+
+**Showing the UI without the stack.** `npm run build:demo` in `frontend/` produces a self-contained
+bundle in `dist-demo/` that runs the real components and the real state machine with an in-browser
+stand-in for the gateway — placing, advancing and cancelling orders all work, and a replayed
+idempotency key is rejected with 409 exactly as order-service does. Asset URLs are relative, so it
+drops onto any static host under a project subpath. Nothing under `src/` imports it, so
+`npm run build` still produces exactly the application bundle.
+
+---
+
 ## Project layout
 
 Each service follows the same layered Go layout, so moving between them requires no re-orientation:
@@ -297,7 +343,7 @@ business rules can be tested with fakes and never import gorm, redis or kafka.
 ├── order-service/          order state machine, idempotency, Kafka producer, gRPC client
 ├── portfolio-service/      gRPC valuation API + Kafka consumer building a real-time ledger, NAV cache-aside
 ├── notification-service/   Kafka consumer group, alert fan-out
-├── frontend/               React + TypeScript dashboard
+├── frontend/               React + TypeScript Control Center — four routed pages
 ├── proto/fundkit.proto     internal service contract
 ├── monitoring/             Prometheus scrape config, alert rules, provisioned Grafana dashboard
 ├── k8s/                    deployments with liveness/readiness probes and resource limits
