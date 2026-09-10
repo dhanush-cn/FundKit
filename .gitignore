@@ -35,6 +35,10 @@ coverage.out
 
 # Personal interview notes - never commit
 INTERVIEW_PREP.md
+FundKit_Interview_Prep.pdf
+
+# Assistant scratch output
+Claude outputs/
 
 # Load test output
 perf/results/*.json

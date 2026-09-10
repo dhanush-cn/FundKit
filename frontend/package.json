@@ -11,7 +11,8 @@
     "typecheck": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "build:demo": "tsc -b && vite build --config vite.demo.config.ts"
   },
   "dependencies": {
     "clsx": "^2.1.1",

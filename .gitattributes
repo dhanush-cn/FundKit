@@ -1,0 +1,27 @@
+# Normalize line endings.
+#
+# Without this file, line endings are whatever each contributor's core.autocrlf
+# happens to be. The checkout on Windows carries CRLF on disk while the index
+# stores LF, so any tool reading the working tree with autocrlf unset — a Linux
+# shell, a container, CI — sees every line of every file as modified. That made
+# `git status` report 36 untouched files as changed and would have turned a
+# frontend commit into a CRLF rewrite of the whole backend.
+#
+# LF in the index and LF in the working tree, everywhere. Shell scripts and
+# Dockerfiles need it anyway: a CRLF shebang inside an image fails with
+# "bad interpreter: /bin/sh^M".
+* text=auto eol=lf
+
+# Binaries git must never touch.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+
+# Generated protobuf stubs — keep them out of diff review.
+*.pb.go linguist-generated=true
+*_grpc.pb.go linguist-generated=true

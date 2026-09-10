@@ -166,7 +166,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(http_requests_total{job=~\"$job\",status_code=~\"5..\"}[$__rate_interval])) / clamp_min(sum(rate(http_requests_total{job=~\"$job\"}[$__rate_interval])), 0.001)",
+          "expr": "(sum(rate(http_requests_total{job=~\"$job\",status_code=~\"5..\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=~\"$job\"}[$__rate_interval])), 0.001)",
           "legendFormat": "",
           "range": true,
           "refId": "A"

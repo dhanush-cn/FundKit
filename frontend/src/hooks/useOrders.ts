@@ -23,6 +23,7 @@ export interface UseOrders {
   refresh: () => Promise<void>;
   placeOrder: (payload: CreateOrderPayload) => Promise<boolean>;
   updateStatus: (orderId: string, status: OrderStatus) => Promise<boolean>;
+  cancelOrder: (orderId: string) => Promise<boolean>;
 }
 
 interface UseOrdersOptions {
@@ -135,6 +136,38 @@ export function useOrders({ enabled, pollIntervalMs = 15000, onUnauthorized }: U
     [handleFailure, refresh],
   );
 
+  /**
+   * Withdraws an order that has not reached a terminal state.
+   *
+   * order-service has exposed DELETE /orders/:id since the first release and
+   * nothing called it, which meant a mistyped amount could only be corrected
+   * by driving the order all the way to FAILED. The delete is a soft one on
+   * the Go side, so the row stays available to the audit trail; what this
+   * removes is the order's claim on the lifecycle, not its history.
+   *
+   * A 404 is treated as success: the order is gone, which is the state the
+   * caller asked for, and a poll that raced the delete should not surface an
+   * error for reaching the same outcome twice.
+   */
+  const cancelOrder = useCallback(
+    async (orderId: string) => {
+      try {
+        await apiRequest<void>(`/orders/${encodeURIComponent(orderId)}`, { method: 'DELETE' });
+        setError(null);
+        await refresh();
+        return true;
+      } catch (cause) {
+        if (cause instanceof ApiError && cause.status === 404) {
+          await refresh();
+          return true;
+        }
+        handleFailure(cause, 'Unable to cancel order');
+        return false;
+      }
+    },
+    [handleFailure, refresh],
+  );
+
   // Signing out must not leave the previous session's orders on screen. Deriving
   // the visible list keeps that a render-time concern rather than an effect that
   // clears state and triggers a second render.
@@ -178,5 +211,6 @@ export function useOrders({ enabled, pollIntervalMs = 15000, onUnauthorized }: U
     refresh,
     placeOrder,
     updateStatus,
+    cancelOrder,
   };
 }
