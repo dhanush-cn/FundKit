@@ -1,58 +1,53 @@
 /* FundKit Control Center — design tokens and base layer.
  * Engineered by Dhanush C N (github.com/dhanush-cn)
  *
- * The palette is three brand colours and nothing else: navy #110E7A, white
- * #FFFFFF, gold #FFBD00. Every surface, border and muted tone below is a flat
- * step inside the navy hue family rather than a gradient or a translucent
- * overlay, so a panel reads as a distinct plane at any zoom level and prints
- * and screenshots the same way it renders.
+ * The palette is three brand colours and nothing else: navy, white and gold.
+ * Every surface, border and muted tone below is a flat step inside the navy
+ * hue family rather than a gradient or a translucent overlay, so a panel reads
+ * as a distinct plane at any zoom level and prints and screenshots the same
+ * way it renders.
  *
- * The one deliberate addition is a gain/loss pair. A portfolio screen has to
- * say which direction a number moved, and gold cannot carry that meaning while
- * it is also the primary action colour. Those two are the only non-brand hues
- * in the system and they appear on numeric values only — never on a surface,
- * a border or a control.
+ * Two themes share that system. They differ in one decision only: what the
+ * page plane behind the panels is. Dark puts the panels on near-black navy;
+ * light puts the same panels on white, so they read as cards. The panels
+ * themselves stay navy in both, which is why the whole component layer below
+ * needs no per-theme branching — it reads tokens and nothing else.
+ *
+ * Dark is the base declaration; `[data-theme='light']` overrides it. A small
+ * inline script in index.html stamps the attribute before first paint, from
+ * localStorage or the OS preference, so the app never flashes the wrong theme.
+ *
+ * The one deliberate addition to the brand triple is a gain/loss pair. A
+ * portfolio screen has to say which direction a number moved, and gold cannot
+ * carry that meaning while it is also the primary action colour. Those two are
+ * the only non-brand hues in the system and they appear on numeric values
+ * only — never on a surface, a border or a control.
  */
 
 :root {
   /* Brand */
   --navy: #110e7a;
   --white: #ffffff;
-  --gold: #ffbd00;
-
-  /* Surfaces — flat steps in the navy family, darkest at the back */
-  --page: #110e7a;
-  --surface-sunken: #0a0850;
-  --surface: #0d0b60;
-  --surface-raised: #17148f;
-
-  /* Lines and text */
-  --line: #2e2aa8;
-  --line-strong: #4b46c9;
-  --text: #ffffff;
-  --text-muted: #adaae8;
-  --text-faint: #8783cc;
+  --gold: #ffcf3d;
+  --gold-strong: #ffdb70;
 
   /* Accent roles */
   --accent: var(--gold);
-  --accent-ink: #110e7a;
-  --accent-soft: #3a3199;
+  --accent-ink: #1a1670;
 
   /* Semantic — numeric values only */
   --gain: #35d67f;
   --loss: #ff6a6a;
-  --warn: #ffbd00;
+  --warn: var(--gold);
 
   /* Status tones for the order lifecycle */
-  --tone-pending: #adaae8;
-  --tone-processing: #ffbd00;
-  --tone-executed: #35d67f;
-  --tone-failed: #ff6a6a;
+  --tone-processing: var(--gold);
+  --tone-executed: var(--gain);
+  --tone-failed: var(--loss);
 
   /* Geometry — two radii, one shadow, no exceptions */
   --radius: 8px;
   --radius-lg: 12px;
-  --shadow: 0 8px 24px rgba(4, 3, 40, 0.45);
 
   /* Rhythm */
   --gap-xs: 6px;
@@ -64,7 +59,78 @@
   --sidebar-width: 248px;
   --content-max: 1240px;
 
+  /* ---------------------------------------------------------------------
+   * Dark theme — the base declaration.
+   *
+   * The page is the darkest plane in the app and the panels sit above it, so
+   * depth runs the same direction as the light theme even though every value
+   * is different.
+   * ------------------------------------------------------------------- */
+
+  /* The page plane, and the few elements painted directly on it */
+  --page: #0b0827;
+  --page-ink: #ffffff;
+  --page-ink-faint: #8b86cf;
+  --page-line: #221d5c;
+  --page-line-strong: #322b78;
+  --page-hover: #171245;
+
+  /* Panel planes, flat steps in the navy family */
+  --sidebar: #100c33;
+  --surface-sunken: #120e40;
+  --surface: #191352;
+  --surface-raised: #262080;
+
+  /* Lines and text on those planes */
+  --line: #2b2570;
+  --line-strong: #3f3899;
+  --text: #ffffff;
+  --text-muted: #b6b2e6;
+  --text-faint: #8a85c9;
+  --tone-pending: #b6b2e6;
+  --accent-soft: #3b3499;
+
+  --shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --backdrop: rgba(5, 3, 25, 0.66);
+
   color-scheme: dark;
+}
+
+/* ---------------------------------------------------------------------------
+ * Light theme.
+ *
+ * Only the planes move. The panels lift one step so they hold their contrast
+ * against white instead of against near-black, and the page-level tokens flip
+ * from white ink to navy ink — that pair is what the topbar reads, and it is
+ * the only place in the app where text sits on the page rather than on a
+ * panel.
+ * ------------------------------------------------------------------------- */
+
+:root[data-theme='light'] {
+  --page: #ffffff;
+  --page-ink: #201c8f;
+  --page-ink-faint: #7b77c4;
+  --page-line: #e6e5f6;
+  --page-line-strong: #d5d3ef;
+  --page-hover: #f4f3fc;
+
+  --sidebar: #2723a3;
+  --surface-sunken: #211d94;
+  --surface: #2926a6;
+  --surface-raised: #3733bd;
+
+  --line: #423ec0;
+  --line-strong: #5f5ad2;
+  --text: #ffffff;
+  --text-muted: #c9c7f2;
+  --text-faint: #a5a2e0;
+  --tone-pending: #c9c7f2;
+  --accent-soft: #4f47b8;
+
+  --shadow: 0 12px 28px rgba(26, 22, 112, 0.22);
+  --backdrop: rgba(26, 22, 112, 0.5);
+
+  color-scheme: light;
 }
 
 * {
@@ -80,7 +146,7 @@ body {
   min-width: 320px;
   min-height: 100vh;
   background-color: var(--page);
-  color: var(--text);
+  color: var(--page-ink);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     'Segoe UI', sans-serif;
   font-size: 14px;
@@ -123,9 +189,10 @@ code {
   font-size: 0.92em;
 }
 
-/* One focus treatment everywhere. Gold on navy clears WCAG non-text contrast
- * comfortably, so keyboard users get the same affordance on every control
- * without per-component overrides. */
+/* One focus treatment everywhere. Gold clears WCAG non-text contrast against
+ * both the navy panels and the white page, so keyboard users get the same
+ * affordance on every control in either theme without per-component
+ * overrides. */
 :focus-visible {
   outline: 2px solid var(--gold);
   outline-offset: 2px;
@@ -137,8 +204,8 @@ code {
   color: var(--accent-ink);
 }
 
-/* Scrollbars follow the surface scale rather than the OS default, which on
- * Windows renders a light grey channel that cuts through the navy. */
+/* Scrollbars follow the page plane rather than the OS default, which renders a
+ * light grey channel that cuts through the dark theme. */
 * {
   scrollbar-color: var(--line-strong) transparent;
   scrollbar-width: thin;

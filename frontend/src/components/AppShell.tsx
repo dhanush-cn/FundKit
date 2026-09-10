@@ -11,6 +11,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 
+import { ThemeToggle } from './ui/ThemeToggle';
 import { NavLink } from '../router/NavLink';
 import { ROUTE_TITLES, useRoute } from '../router/route';
 import { useDashboard } from '../state/dashboard-context';
@@ -109,6 +110,8 @@ export function AppShell({ children }: { children: ReactNode }) {
                 </span>
               </span>
             </span>
+
+            <ThemeToggle />
 
             <button type="button" className="button button-ghost" onClick={refreshAll}>
               <RefreshCw size={15} />
