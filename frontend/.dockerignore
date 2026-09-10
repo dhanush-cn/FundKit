@@ -1,0 +1,25 @@
+# Engineered by Dhanush C N (github.com/dhanush-cn)
+#
+# Without this file the Dockerfile's `COPY . .` copies the HOST node_modules
+# over the one `npm ci` just installed in the image. That is fatal rather than
+# merely wasteful: node_modules here was installed on Windows, so it carries
+# @rolldown/binding-win32-x64-msvc and no Linux binding, and `npm run build`
+# inside the alpine builder dies with "Cannot find native binding".
+#
+# It also keeps the build context small — the context is uploaded to the Docker
+# daemon on every build, and node_modules alone is a few hundred megabytes.
+node_modules
+dist
+dist-demo
+dist-ssr
+coverage
+
+# Screenshots are documentation; nginx only ever serves dist/.
+docs
+
+.git
+.gitignore
+*.log
+.vscode
+.idea
+.DS_Store
