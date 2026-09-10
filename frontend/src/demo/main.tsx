@@ -120,9 +120,11 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body ?? '{}'));
       const existing = orders.find((order) => order.idempotency_key === body.idempotency_key);
       if (existing) {
-        // The guard order-service enforces in Redis: a replayed key returns
-        // the original order rather than creating a second one.
-        return reply(existing);
+        // Mirrors order-service: the Redis SETNX claim fails on a replayed key,
+        // the service returns domain.ErrDuplicateOrder, and the handler maps
+        // that to 409. It does NOT return the original order — the point of the
+        // guard is that the second write never happens at all.
+        return reply({ error: 'duplicate order for this idempotency key' }, 409);
       }
       const created = {
         ...body,

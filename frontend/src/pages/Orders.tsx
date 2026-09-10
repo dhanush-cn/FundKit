@@ -238,7 +238,7 @@ export function Orders() {
           <p className="helper-text">
             The gateway forwards this to order-service, which claims the Redis idempotency key,
             persists the order to Postgres and publishes the event to Kafka. Resubmitting the same
-            key returns the original order rather than creating a second one.
+            key is rejected with 409 rather than creating a second order.
           </p>
         </Panel>
 
