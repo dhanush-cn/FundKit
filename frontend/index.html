@@ -10,6 +10,30 @@
       content="FundKit Control Center — mutual fund and SIP order control plane. Engineered by Dhanush C N."
     />
     <title>FundKit Control Center — Engineered by Dhanush C N</title>
+    <!-- Theme boot. This runs before the bundle and before first paint, so the
+         app never flashes the wrong theme on a reload. It duplicates the
+         fallback order in src/lib/theme.ts on purpose: that module cannot be
+         imported here without shipping a second request ahead of the bundle,
+         which is exactly the delay this script exists to avoid. Keep the two
+         in step — the storage key and attribute name are asserted in the
+         theme tests. -->
+    <script>
+      (function () {
+        var theme;
+        try {
+          theme = window.localStorage.getItem('fundkit_theme');
+        } catch (error) {
+          theme = null;
+        }
+        if (theme !== 'light' && theme !== 'dark') {
+          theme =
+            window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+              ? 'light'
+              : 'dark';
+        }
+        document.documentElement.setAttribute('data-theme', theme);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

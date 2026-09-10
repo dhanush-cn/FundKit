@@ -11,9 +11,11 @@ src/
 ├── lib/api.ts        typed fetch wrapper: auth header, ApiError, correlation id capture
 ├── lib/format.ts     currency, date and status formatting
 ├── lib/palette.ts    allocation-chart ramp, drawn from the three brand colours
+├── lib/theme.ts      light/dark resolution, persistence and the data-theme attribute
 ├── types.ts          the API contract, mirrored from the Go handlers
 ├── hooks/
 │   ├── useAuth.ts          session token lifecycle
+│   ├── useTheme.ts         the light/dark choice, following the OS until overridden
 │   ├── useOrders.ts        order book: polling, mutation, cancel, derived metrics
 │   ├── usePortfolio.ts     P&L reads, with a distinct message for a 503 from the gRPC chain
 │   └── useServiceHealth.ts aggregated stack status
@@ -55,17 +57,34 @@ inlines it at build time, so the Docker image takes it as a build argument.
 
 ## Design system
 
-Three brand colours and nothing else: navy `#110E7A`, white `#FFFFFF`, gold `#FFBD00`, defined as
-tokens in `src/index.css`.
+Three brand colours and nothing else: navy, white and gold `#FFCF3D`, defined as tokens in
+`src/index.css`.
 
-- **Flat by rule.** Depth comes from four solid navy planes — sidebar, panel, page, hover — never a
+- **Flat by rule.** Depth comes from solid navy planes — sidebar, panel, page, hover — never a
   gradient or a translucent overlay. `grep -E '(linear|radial|conic)-gradient' src/*.css` returns
   nothing; a hit is a regression.
+- **Two themes, one component layer.** Light and dark differ in exactly one decision: what the page
+  plane behind the panels is — white, or near-black navy. The panels stay navy with white text in
+  both, so `App.css` branches on nothing: it reads tokens, and `[data-theme='light']` in
+  `index.css` redefines them. The distinction every rule has to respect is which plane it paints on
+  — `--page`/`--page-ink` inverts between themes, `--surface`/`--text` does not. A rule that paints
+  a panel background must also set `color: var(--text)`, or it inherits page ink and disappears in
+  light mode.
 - **Gold is reserved.** It marks the primary action, the active nav item, or the focus ring. Nothing
   else earns it.
 - **Two exceptions, on numbers only.** `--gain` and `--loss` are the sole non-brand hues, and they
   never touch a surface, a border or a control. A portfolio screen has to say which way a figure
   moved, and gold cannot carry that meaning while it is also the call to action.
+
+### Theme selection
+
+`src/lib/theme.ts` owns the precedence: an explicit choice in `localStorage` beats the OS
+`prefers-color-scheme`, which beats the dark default. The choice is a single `data-theme` attribute
+on `<html>`, and an inline script in `index.html` and `demo.html` stamps it **before** the bundle
+loads, so a reload never flashes the wrong theme. That script duplicates the fallback order on
+purpose — importing the module would put a request ahead of first paint, which is the delay it
+exists to avoid — and `src/lib/theme.test.ts` pins the storage key and attribute name both sides
+hardcode. Until the user presses the toggle, an open tab keeps following the OS.
 
 ## Hosted demo
 

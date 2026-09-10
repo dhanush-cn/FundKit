@@ -9,6 +9,7 @@ import { useCallback, useState } from 'react';
 import type { FormEvent } from 'react';
 import { motion } from 'framer-motion';
 
+import { ThemeToggle } from './ui/ThemeToggle';
 import type { UseAuth } from '../hooks/useAuth';
 
 const AUTHOR = 'Dhanush C N';
@@ -59,6 +60,7 @@ export function AuthPanel({ auth }: AuthPanelProps) {
 
   return (
     <div className="auth-shell">
+      <ThemeToggle className="icon-button auth-theme-toggle" />
       <motion.div
         className="auth-card"
         initial={{ opacity: 0, y: 12 }}
